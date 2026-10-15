@@ -42,10 +42,14 @@ commodity_forecast/
   data.py       real EIA data ingestion (no API key) + local CSV cache
   forecast.py   wraps conformal-forecast's prepare_split_from_series + SplitConformalForecaster
                 (static calibration) and AdaptiveConformalForecaster /
-                SlidingWindowAdaptiveConformalForecaster (ACI, since this run)
+                SlidingWindowAdaptiveConformalForecaster (ACI)
+  probability.py  converts a calibrated forecast into a Kalshi-style
+                  threshold probability P(price > K), backtested against
+                  real history (since 2026-10-15)
 tests/
-  test_data.py       date-math unit test + live EIA integration test + cache-hit test
-  test_forecast.py   synthetic-data + real-WTI-series end-to-end tests, static and ACI
+  test_data.py        date-math unit test + live EIA integration test + cache-hit test
+  test_forecast.py    synthetic-data + real-WTI-series end-to-end tests, static and ACI
+  test_probability.py hand-computed sanity checks + a real-WTI-series backtest
 data/
   wti_spot_daily.csv real cached WTI daily spot price series, 1986-01-02 to present
 predictions/
@@ -160,14 +164,79 @@ committed CSV cache with new real data doesn't spuriously fail it), a
 bounded-`window` sanity check, and a pinned check that `window=75`
 specifically clears 89%. Full suite: **12/12 passed.**
 
+## From a calibrated interval to a Kalshi-style probability (2026-10-15)
+
+Everything above answers "is the true price in this interval, with ~90%
+probability?" A Kalshi-style market asks a sharper question: P(price > K)
+for a specific strike K, as one number — which the interval alone doesn't
+give. `commodity_forecast/probability.py` converts one into the other by
+treating the model's own held-out calibration-split residuals (real
+forecast errors on data the model never trained or calibrated on, already
+computed as part of split conformal's own machinery, previously thrown
+away as nothing but an absolute-value quantile) as an empirical sample of
+"the forecast error distribution": P(y > K) ≈ the fraction of those real
+residuals that would have pushed today's point forecast past K. No
+assumed shape (no "assume Gaussian errors"), no new hyperparameters, and —
+the part that actually matters — it's backtestable the same honest way
+coverage was: ask the same question over and over across real history and
+check whether events predicted at ~p% actually happened about p% of the
+time.
+
+**Backtest, on the real WTI test split (same split as the tables above),
+asking a forecast-relative question for every test day** (e.g. "will the
+price be more than 5% above today's own point forecast?", at offsets
+`{-10%, -5%, -2%, 0%, +2%, +5%, +10%}` — 1,904 test days × 7 offsets =
+13,328 real, independent questions):
+
+| Metric | Value | Context |
+|---|---|---|
+| Brier score | **0.0906** | 0.25 = no skill (always guessing 50%); 0 = perfect |
+| Mean calibration error | **0.026** | count-weighted mean \|predicted − actual\| across probability-decile bins |
+
+Reliability by predicted-probability decile (count, mean predicted vs. the
+real, realized exceedance rate in that bucket):
+
+| Predicted range | Count | Mean predicted | Actual rate |
+|---|---|---|---|
+| 0.0–0.1 | 4,541 | 1.8% | 4.6% |
+| 0.1–0.2 | 965 | 13.1% | 17.0% |
+| 0.2–0.3 | 164 | 23.1% | 29.9% |
+| 0.3–0.4 | 37 | 34.6% | 40.5% |
+| 0.4–0.5 | 5 | 42.3% | 80.0% |
+| 0.5–0.6 | 1,905 | 51.4% | 53.1% |
+| 0.6–0.7 | 42 | 65.7% | 59.5% |
+| 0.7–0.8 | 195 | 76.0% | 81.0% |
+| 0.8–0.9 | 1,244 | 86.5% | 85.4% |
+| 0.9–1.0 | 4,230 | 98.4% | 95.9% |
+
+Honestly read: the method is meaningfully better than guessing (a Brier
+score of 0.09 vs. 0.25 for a coin flip) and most buckets track real
+outcomes within a few points. It also has a real, disclosed weak spot: the
+0.4–0.5 bucket (only 5 of 13,328 observations — a rare near-the-edge
+offset/day combination) is badly off, 42% predicted vs. 80% actual, which
+is a small-sample noise artifact rather than a sign the method
+systematically fails near 50-50 calls (the neighboring 0.5–0.6 bucket, with
+1,905 observations, is well-calibrated at 51.4% vs. 53.1%). This
+limitation, and the underlying assumption it comes from (treating the
+calibration-residual sample as the *entire* predictive distribution for
+every test point, independent of forecast level or time), is stated
+directly in `probability.py`'s own module docstring, not glossed over.
+
+5 new tests (12 → 17): hand-computed sanity checks against a tiny known
+residual sample (an exact P(y>K) calculation, monotonicity in the
+threshold, correct broadcasting across multiple point forecasts), plus the
+real-WTI backtest above re-run as a loose (`< 0.15` Brier, `< 0.08` mean
+calibration error — real thresholds a future legitimate data refresh
+shouldn't spuriously trip) regression check, and a custom-offsets test.
+Full suite: **17/17 passed.**
+
 ## What's next
 
 1. ~~Try `conformal-forecast`'s existing Adaptive Conformal Inference
    (fixed-pool and sliding-window variants) on this series instead of
    static split conformal, to see whether it closes the coverage gap above
-   the way it did for `conformal-forecast`'s own airline case.~~ **Done,
-   this run** — see above; a bounded sliding window gets within ~0.2-0.5pp
-   of nominal.
+   the way it did for `conformal-forecast`'s own airline case.~~ **Done** —
+   see above; a bounded sliding window gets within ~0.2-0.5pp of nominal.
 2. A stronger model than the naive baseline (conformal-forecast's LSTM is
    already available as a dependency) — now with a real, interesting
    question to pair it with: does ACI's benefit above hold up with a model
@@ -176,11 +245,18 @@ specifically clears 89%. Full suite: **12/12 passed.**
 3. A principled way to pick `window` instead of eyeballing a sweep (e.g. a
    held-out validation slice), since this run's own sweep shows the choice
    matters less than *having* a bounded window at all, but isn't flat.
-4. Convert a calibrated interval into an actual Kalshi-style threshold
+4. ~~Convert a calibrated interval into an actual Kalshi-style threshold
    probability (e.g. P(price > K) by a given date), and backtest that
-   conversion against real history.
-5. Once the probability layer is backtested, start the real forward track
-   record in `predictions/` — one dated, non-backdated entry at a time.
+   conversion against real history.~~ **Done** — see above.
+5. Wire the probability layer into ACI's online-adapting residual pool
+   (currently it only ever uses `fit_calibrated_naive_forecaster`'s static
+   calibration-split residuals) — plausibly improves calibration the same
+   way ACI improved raw interval coverage, but unverified until it's
+   actually built and backtested the same honest way.
+6. Now that the probability layer is backtested, start the real forward
+   track record in `predictions/` — one dated, non-backdated entry at a
+   time: a specific real strike K and date, the probability this module
+   assigned it *before* the outcome was known, and later, the real outcome.
 
 ## Running it
 
