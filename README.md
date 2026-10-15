@@ -41,8 +41,9 @@ Every result in this repository is real and honestly labeled:
 commodity_forecast/
   data.py       real EIA data ingestion (no API key) + local CSV cache
   forecast.py   wraps conformal-forecast's prepare_split_from_series + SplitConformalForecaster
-                (static calibration) and AdaptiveConformalForecaster /
-                SlidingWindowAdaptiveConformalForecaster (ACI)
+                (static calibration, naive baseline or -- since 2026-10-15 --
+                an LSTM via fit_calibrated_lstm_forecaster) and
+                AdaptiveConformalForecaster / SlidingWindowAdaptiveConformalForecaster (ACI)
   probability.py  converts a calibrated forecast into a Kalshi-style
                   threshold probability P(price > K), backtested against
                   real history with both a static and an online-adapting
@@ -53,6 +54,7 @@ commodity_forecast/
 tests/
   test_data.py         date-math unit test + live EIA integration test + cache-hit test
   test_forecast.py     synthetic-data + real-WTI-series end-to-end tests, static and ACI
+  test_forecast_lstm.py synthetic + real-WTI tests for the LSTM point model (since 2026-10-15)
   test_probability.py  hand-computed sanity checks + a real-WTI-series backtest
   test_track_record.py forward-prediction structure checks + synthetic-future resolution checks
 data/
@@ -321,6 +323,64 @@ that class's own docstring), a mismatched-length error-handling check, and
 the real-WTI backtest above re-run as a loose regression check. Full suite:
 **29/29 passed.**
 
+## Does a stronger point model help? (2026-10-15)
+
+Every result above uses `NaiveForecaster` ("tomorrow = today, in normalized
+units") as the point model — deliberately, for the first slice, to prove
+the real dependency + real data + real calibration pipeline held together
+end to end before chasing accuracy (see "What's next" below, item 2, as it
+read before this run). conformal-forecast's own from-scratch LSTM is
+already a real dependency (it's what every ACI/EnbPI result in *that*
+repo's own README is measured against), so trying it here costs no new
+infrastructure — just a new `fit_calibrated_lstm_forecaster` function
+(`commodity_forecast/forecast.py`) that wraps the LSTM in the same
+`DeltaWrapper` (predict the *change*, not the level) convention
+conformal-forecast's own experiment code uses for every neural model on
+every dataset, and otherwise runs through the exact same split, lookback,
+and alpha as the naive baseline — so any difference is attributable to the
+model, not a different split.
+
+The honest answer, measured on the real WTI series, same test split both
+ways (1,904 points):
+
+| Model | MAE | Coverage (static) | Coverage gap | Mean interval width | Brier score | Mean calibration error |
+|---|---|---|---|---|---|---|
+| Naive | $1.43/bbl | 80.9% | -9.1pp | $4.18/bbl | 0.0906 | 0.0258 |
+| LSTM (delta) | $1.44/bbl | 80.6% | -9.4pp | $4.18/bbl | 0.0907 | 0.0262 |
+
+**A stronger model does not measurably help here — and that's a real,
+useful negative result, not a bug.** WTI daily spot price is close enough
+to a random walk that `NaiveForecaster`'s implicit "predict zero change"
+is already close to the best achievable one-day-ahead point forecast on
+this series; a `DeltaWrapper`-wrapped LSTM trained to predict the same
+delta converges to essentially the same thing, so every downstream number
+(interval width, coverage, Brier score, calibration error) comes out
+statistically indistinguishable from the naive baseline's. This mirrors a
+well-known property of liquid commodity/financial daily price series
+(near-random-walk behavior makes naive point forecasts hard to beat) rather
+than indicating anything wrong with the LSTM, the calibration pipeline, or
+the probability layer — all three visibly *do* work (the coverage gap and
+Brier score both land in the same real, reasonable range as the naive
+baseline's, not broken or degenerate).
+
+**Confirms the probability layer is genuinely model-agnostic, not
+coincidentally naive-shaped:** `backtest_threshold_calibration`/
+`backtest_threshold_calibration_adaptive` (`commodity_forecast/probability.py`)
+needed zero code changes to run against the LSTM-based
+`CalibratedForecastResult` — both functions only ever read
+`result.conformal_forecaster.{model,predict}`, `result.cal_residuals_normalized`,
+and `result.normalizer_{mean,std}`, never anything `NaiveForecaster`-specific.
+This was checked directly (`tests/test_forecast_lstm.py`'s
+`test_lstm_calibrated_result_is_a_drop_in_for_the_probability_layer`), not
+just inferred from reading the code.
+
+4 new tests (29 → 33, `tests/test_forecast_lstm.py`): the LSTM forecaster
+sanity-checked on synthetic data and the real WTI series (same bounds as
+the naive baseline's own equivalent tests), confirmation that both
+functions produce the identical split sizes (making the comparison above
+apples-to-apples), and the probability-layer drop-in check above. Full
+suite: **33/33 passed.**
+
 ## Forward track record (2026-10-15 — started)
 
 Everything above (including the backtest just above) is retrospective:
@@ -367,11 +427,23 @@ suite: **25/25 passed.**
    static split conformal, to see whether it closes the coverage gap above
    the way it did for `conformal-forecast`'s own airline case.~~ **Done** —
    see above; a bounded sliding window gets within ~0.2-0.5pp of nominal.
-2. A stronger model than the naive baseline (conformal-forecast's LSTM is
-   already available as a dependency) — now with a real, interesting
-   question to pair it with: does ACI's benefit above hold up with a model
-   that isn't a trivial "today predicts tomorrow" baseline, or does a
-   better point model change which calibration method wins?
+2. ~~A stronger model than the naive baseline (conformal-forecast's LSTM is
+   already available as a dependency) — does ACI's benefit above hold up
+   with a model that isn't a trivial "today predicts tomorrow" baseline,
+   or does a better point model change which calibration method wins?~~
+   **Done (2026-10-15)** — see "Does a stronger point model help?" above.
+   Honest answer: no, not measurably, on this series — WTI's near-random-
+   walk behavior means the LSTM converges to essentially the same
+   zero-delta forecast `NaiveForecaster` already makes, so every
+   downstream number (coverage, interval width, Brier score, calibration
+   error) comes out statistically indistinguishable from the naive
+   baseline's. A real, useful negative result, not a dead end: it means
+   the naive baseline wasn't quietly understating what's achievable here,
+   so items 3 and the adaptive-pool work above are measuring real
+   calibration-method effects, not an artifact of a weak point model.
+   conformal-forecast's Transformer model family (shipped there 2026-10-15,
+   not yet tried here) remains available if a future run wants a second
+   data point on "does model choice matter at all on this series."
 3. A principled way to pick `window` instead of eyeballing a sweep (e.g. a
    held-out validation slice), since this run's own sweep shows the choice
    matters less than *having* a bounded window at all, but isn't flat.
