@@ -26,6 +26,11 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from forecasting.adaptive import (
+    AdaptiveConformalForecaster,
+    SlidingWindowAdaptiveConformalForecaster,
+    evaluate_adaptive_coverage,
+)
 from forecasting.conformal import SplitConformalForecaster, evaluate_coverage
 from forecasting.experiment import prepare_split_from_series
 from forecasting.models import NaiveForecaster
@@ -34,6 +39,14 @@ from forecasting.models import NaiveForecaster
 @dataclass
 class CalibratedForecastResult:
     conformal_forecaster: SplitConformalForecaster
+    normalizer_mean: float
+    normalizer_std: float
+    diagnostics: dict
+
+
+@dataclass
+class AdaptiveCalibratedForecastResult:
+    adaptive_forecaster: AdaptiveConformalForecaster
     normalizer_mean: float
     normalizer_std: float
     diagnostics: dict
@@ -99,6 +112,94 @@ def fit_calibrated_naive_forecaster(
 
     return CalibratedForecastResult(
         conformal_forecaster=conformal,
+        normalizer_mean=normalizer.mean_,
+        normalizer_std=normalizer.std_,
+        diagnostics=diagnostics,
+    )
+
+
+def fit_adaptive_naive_forecaster(
+    series_values: np.ndarray,
+    lookback: int = 5,
+    alpha: float = 0.1,
+    gamma: float = 0.05,
+    variant: str = "sliding",
+    window: int | None = None,
+) -> AdaptiveCalibratedForecastResult:
+    """Fit the same NaiveForecaster baseline as `fit_calibrated_naive_forecaster`,
+    but calibrated with conformal-forecast's Adaptive Conformal Inference (ACI)
+    instead of static split conformal, to see whether ACI closes the real,
+    measured 80.9%-vs-90% coverage gap `fit_calibrated_naive_forecaster` found
+    on the real WTI series (see the project README's "First real result").
+
+    `variant="fixed"` uses `AdaptiveConformalForecaster` -- only the
+    miscoverage rate (alpha_t) adapts online; the residual pool stays frozen
+    at the calibration window, so the interval can never exceed the
+    calibration pool's own maximum residual.
+
+    `variant="sliding"` (default) uses `SlidingWindowAdaptiveConformalForecaster`
+    -- the residual pool itself is updated online with each step's own
+    observed residual (via `window`: `None` for an unbounded growing buffer,
+    or a positive int for a true bounded sliding window), removing that
+    ceiling. This is the variant conformal-forecast's own README recommends
+    trying first when a fixed-pool ceiling is suspected (which is exactly
+    the WTI series' situation: the calibration window is a tiny ~5-point
+    lookback slice of a 9,500+ point, highly non-stationary series).
+
+    Uses the *same* NaiveForecaster baseline, the same lookback/alpha, and
+    the same train/cal/test split as `fit_calibrated_naive_forecaster` (both
+    call `prepare_split_from_series` identically), so a comparison against
+    that function's diagnostics is a fair, apples-to-apples test of the
+    calibration method only -- not a different model or a different split.
+
+    Unlike static split conformal, ACI needs the true y values during
+    prediction (it's inherently sequential: alpha_t for step t+1 depends on
+    whether step t's interval covered the truth) -- this models a realistic
+    deployment where today's real price is known before tomorrow's forecast
+    is due, which is true for this series.
+    """
+    if variant not in ("fixed", "sliding"):
+        raise ValueError("variant must be 'fixed' or 'sliding'")
+
+    (
+        X_train,
+        y_train,
+        X_cal,
+        y_cal,
+        X_test,
+        y_test,
+        normalizer,
+        _period,
+    ) = prepare_split_from_series(series_values, lookback=lookback, period=lookback, label="wti_spot")
+
+    model = NaiveForecaster()
+    if variant == "fixed":
+        adaptive: AdaptiveConformalForecaster = AdaptiveConformalForecaster(model, alpha=alpha, gamma=gamma)
+    else:
+        adaptive = SlidingWindowAdaptiveConformalForecaster(model, alpha=alpha, gamma=gamma, window=window)
+
+    adaptive.fit(X_train, y_train, X_cal, y_cal)
+    prediction = adaptive.predict_sequential(X_test, y_test.reshape(-1))
+    coverage = evaluate_adaptive_coverage(prediction, y_test)
+
+    # De-normalize for a human-readable MAE in real dollars/barrel, same
+    # convention as fit_calibrated_naive_forecaster.
+    point_denorm = normalizer.inverse_transform(prediction.point)
+    y_test_denorm = normalizer.inverse_transform(y_test)
+    mae_usd = float(np.mean(np.abs(point_denorm - y_test_denorm)))
+
+    diagnostics = {
+        **coverage,
+        "mae_usd_per_bbl": mae_usd,
+        "n_train_windows": int(len(X_train)),
+        "n_cal_windows": int(len(X_cal)),
+        "lookback": lookback,
+        "variant": variant,
+        "window": window,
+    }
+
+    return AdaptiveCalibratedForecastResult(
+        adaptive_forecaster=adaptive,
         normalizer_mean=normalizer.mean_,
         normalizer_std=normalizer.std_,
         diagnostics=diagnostics,
