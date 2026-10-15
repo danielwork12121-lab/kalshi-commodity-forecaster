@@ -503,6 +503,24 @@ re-touches an already-resolved record, and it resolves against the
 *first* future observation, not whichever one is most convenient. Full
 suite: **25/25 passed.**
 
+**Second batch, added 2026-10-15** (a later, separate run from the one
+that resolved the first batch — never the same run that just graded a
+prior batch, per the no-self-grading rule), against the real cached
+series refreshed the same run (last real observation: 2026-10-14,
+$101.91/bbl):
+
+| Made at (UTC) | Last observed | Question | Threshold | P(exceed) | Outcome |
+|---|---|---|---|---|---|
+| 2026-10-15 22:46:22 | 2026-10-14, $101.91 | Will the next real observed price be *above* $101.91 (flat)? | $101.91 | 51.4% | pending |
+| 2026-10-15 22:46:31 | 2026-10-14, $101.91 | Will the next real observed price be *above* $103.95 (+2%)? | $103.95 | 5.0% | pending |
+| 2026-10-15 22:46:41 | 2026-10-14, $101.91 | Will the next real observed price be *above* $99.87 (-2%)? | $99.87 | 94.5% | pending |
+
+All three are genuinely pending — EIA had not published anything newer
+than 2026-10-14 at the time these were made (confirmed via a fresh
+`fetch_wti_daily(refresh=True)` the same run), so there is no future data
+yet for any of them to resolve against. A later run should resolve these
+once newer data exists, never this one.
+
 ## What's next
 
 1. ~~Try `conformal-forecast`'s existing Adaptive Conformal Inference
@@ -557,12 +575,16 @@ suite: **25/25 passed.**
    batch (3 predictions) was itself resolved by a later run the same day
    (2026-10-15) once newer EIA data existed — all three landed on the
    side their stated probability favored (not itself a calibration claim
-   at n=3; see the backtest above for the real evidence). The natural
-   follow-up: a *future* run should add the next batch of forward
-   predictions (never the same run that just resolved the prior batch),
-   and once more predictions accumulate, start reporting a running hit
-   rate / calibration check on the forward record itself, honestly
-   caveated for its still-small sample size.
+   at n=3; see the backtest above for the real evidence). **A second batch
+   (3 more predictions) was added 2026-10-15** by a later, separate run —
+   see "Forward track record" above; all three are still pending as of
+   this writing (EIA has not yet published anything newer than their own
+   `last_observed_date`). The natural follow-up: a *future* run should
+   resolve this second batch once newer EIA data exists (never the run
+   that just added it), and once enough predictions accumulate across
+   batches, start reporting a running hit rate / calibration check on the
+   forward record itself, honestly caveated for its still-small sample
+   size.
 
 ## Running it
 
