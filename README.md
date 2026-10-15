@@ -46,14 +46,19 @@ commodity_forecast/
   probability.py  converts a calibrated forecast into a Kalshi-style
                   threshold probability P(price > K), backtested against
                   real history (since 2026-10-15)
+  track_record.py makes + persists real, dated, forward (non-backtested)
+                   predictions, and resolves them once real outcomes exist
+                   (since 2026-10-15)
 tests/
-  test_data.py        date-math unit test + live EIA integration test + cache-hit test
-  test_forecast.py    synthetic-data + real-WTI-series end-to-end tests, static and ACI
-  test_probability.py hand-computed sanity checks + a real-WTI-series backtest
+  test_data.py         date-math unit test + live EIA integration test + cache-hit test
+  test_forecast.py     synthetic-data + real-WTI-series end-to-end tests, static and ACI
+  test_probability.py  hand-computed sanity checks + a real-WTI-series backtest
+  test_track_record.py forward-prediction structure checks + synthetic-future resolution checks
 data/
   wti_spot_daily.csv real cached WTI daily spot price series, 1986-01-02 to present
 predictions/
-  README.md     explains the (currently empty) forward track record
+  README.md         explains the forward track record's format and resolution rule
+  track_record.jsonl the real, dated predictions themselves (since 2026-10-15)
 ```
 
 ### Data source
@@ -230,6 +235,45 @@ calibration error — real thresholds a future legitimate data refresh
 shouldn't spuriously trip) regression check, and a custom-offsets test.
 Full suite: **17/17 passed.**
 
+## Forward track record (2026-10-15 — started)
+
+Everything above (including the backtest just above) is retrospective:
+every question it answers was already resolved by the time the
+measurement looked at it. This section is the opposite kind of real — a
+prediction made *before* the outcome is known, timestamped to prove it,
+graded later only once the real outcome actually exists. See
+`predictions/README.md` for the full format and the no-self-grading rule
+(a future run, never this one, resolves these).
+
+First batch, `commodity_forecast/track_record.py`'s `make_forward_prediction`,
+using the real cached WTI series (last real observation: 2026-10-06,
+$96.24/bbl — re-verified fresh against EIA this run; no newer observation
+was available from the source yet) and the exact same calibration-residual
+machinery the backtest above already validated:
+
+| Made at (UTC) | Last observed | Question | Threshold | P(exceed) | Outcome |
+|---|---|---|---|---|---|
+| 2026-10-15 03:42:33 | 2026-10-06, $96.24 | Will the next real observed price be *above* $96.24 (flat)? | $96.24 | **51.3%** | pending |
+| 2026-10-15 03:42:33 | 2026-10-06, $96.24 | Will the next real observed price be *above* $98.16 (+2%)? | $98.16 | **5.8%** | pending |
+| 2026-10-15 03:42:33 | 2026-10-06, $96.24 | Will the next real observed price be *above* $94.32 (-2%)? | $94.32 | **93.5%** | pending |
+
+Nothing here is a guess dressed up after the fact — `made_at_utc` in
+`predictions/track_record.jsonl` is the real system clock at the moment
+each line was generated, and `outcome` starts, and stays, `"pending"`
+until a *later* run calls `resolve_pending_predictions()` against data
+that didn't exist yet when these were made. 8 new tests
+(`tests/test_track_record.py`, 17 → 25): the forward-prediction function's
+output is checked against the real cached series it was run on (right
+last-observed date/price, threshold tracks the requested offset,
+probability monotonic in the offset, timestamp genuinely recent);
+append/load round-trips through a real file; and `resolve_pending_predictions`
+is checked against synthetic future data for the three things that matter
+for honesty — it resolves exceeded/not-exceeded correctly, it never
+resolves using data at or before the question's own date, it never
+re-touches an already-resolved record, and it resolves against the
+*first* future observation, not whichever one is most convenient. Full
+suite: **25/25 passed.**
+
 ## What's next
 
 1. ~~Try `conformal-forecast`'s existing Adaptive Conformal Inference
@@ -253,10 +297,16 @@ Full suite: **17/17 passed.**
    calibration-split residuals) — plausibly improves calibration the same
    way ACI improved raw interval coverage, but unverified until it's
    actually built and backtested the same honest way.
-6. Now that the probability layer is backtested, start the real forward
+6. ~~Now that the probability layer is backtested, start the real forward
    track record in `predictions/` — one dated, non-backdated entry at a
    time: a specific real strike K and date, the probability this module
-   assigned it *before* the outcome was known, and later, the real outcome.
+   assigned it *before* the outcome was known, and later, the real
+   outcome.~~ **Done** — see "Forward track record" above; 3 real pending
+   predictions as of 2026-10-15. The natural follow-up: a *future* run
+   should call `resolve_pending_predictions()` against fresh data before
+   adding new predictions, and once a few resolve, report the running
+   hit rate honestly (small-sample caveats included) rather than only
+   ever adding new pending entries.
 
 ## Running it
 
