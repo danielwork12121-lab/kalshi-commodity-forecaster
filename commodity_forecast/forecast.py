@@ -34,7 +34,7 @@ from forecasting.adaptive import (
 )
 from forecasting.conformal import SplitConformalForecaster, evaluate_coverage
 from forecasting.experiment import prepare_split_from_series
-from forecasting.models import NaiveForecaster
+from forecasting.models import DeltaWrapper, LSTMForecaster, NaiveForecaster
 
 
 @dataclass
@@ -123,6 +123,89 @@ def fit_calibrated_naive_forecaster(
         "n_train_windows": int(len(X_train)),
         "n_cal_windows": int(len(X_cal)),
         "lookback": lookback,
+    }
+
+    return CalibratedForecastResult(
+        conformal_forecaster=conformal,
+        normalizer_mean=normalizer.mean_,
+        cal_residuals_normalized=cal_residuals_normalized,
+        normalizer_std=normalizer.std_,
+        diagnostics=diagnostics,
+    )
+
+
+def fit_calibrated_lstm_forecaster(
+    series_values: np.ndarray,
+    lookback: int = 5,
+    alpha: float = 0.1,
+    seed: int = 0,
+) -> CalibratedForecastResult:
+    """Same calibrated-forecast pipeline as `fit_calibrated_naive_forecaster`
+    above, but with conformal-forecast's own from-scratch LSTM instead of
+    `NaiveForecaster` -- this project's own "What's next" item 2: *"A
+    stronger model than the naive baseline (conformal-forecast's LSTM, and
+    now its Transformer too, are already available as a dependency) --
+    does ACI's benefit, or the probability layer's calibration, hold up
+    with a non-trivial point model?"*
+
+    Wrapped in `DeltaWrapper` (predicting tomorrow's *change* rather than
+    its absolute level), the same convention conformal-forecast's own
+    `forecasting/experiment.py` uses for every neural model on every
+    dataset it benchmarks -- for a near-random-walk daily commodity price
+    series, "predict the delta" is a far easier, better-conditioned
+    learning target than "predict the level directly," and using anything
+    else here would not be a fair test of whether a stronger *model*
+    helps, since a bare (non-delta) LSTM would be fighting a harder
+    problem than `NaiveForecaster`'s implicit delta-of-zero assumption
+    already handles for free.
+
+    Uses the identical train/cal/test split, `lookback`, and `alpha` as
+    `fit_calibrated_naive_forecaster` (both call `prepare_split_from_series`
+    identically) -- so any difference between the two functions' results
+    is attributable to the model alone, not a different split or a
+    different amount of held-out data.
+
+    `backtest_threshold_calibration`/`backtest_threshold_calibration_adaptive`
+    in `commodity_forecast/probability.py` need no changes to work with
+    this function's output: both already only ever read
+    `result.conformal_forecaster.{model,predict}`,
+    `result.cal_residuals_normalized`, and `result.normalizer_{mean,std}`
+    off the generic `CalibratedForecastResult` -- never anything
+    `NaiveForecaster`-specific -- so this is a genuinely drop-in stronger
+    point model for the whole probability layer, not just the interval
+    case.
+    """
+    (
+        X_train,
+        y_train,
+        X_cal,
+        y_cal,
+        X_test,
+        y_test,
+        normalizer,
+        _period,
+    ) = prepare_split_from_series(series_values, lookback=lookback, period=lookback, label="wti_spot")
+
+    model = DeltaWrapper(LSTMForecaster(hidden_size=32, num_layers=1, seed=seed))
+    conformal = SplitConformalForecaster(model=model, alpha=alpha)
+    conformal.fit(X_train, y_train, X_cal, y_cal)
+
+    prediction = conformal.predict(X_test)
+    coverage = evaluate_coverage(prediction, y_test)
+
+    point_denorm = normalizer.inverse_transform(prediction.point)
+    y_test_denorm = normalizer.inverse_transform(y_test)
+    mae_usd = float(np.mean(np.abs(point_denorm - y_test_denorm)))
+
+    cal_residuals_normalized = (y_cal - conformal.model.predict(X_cal)).reshape(-1)
+
+    diagnostics = {
+        **coverage,
+        "mae_usd_per_bbl": mae_usd,
+        "n_train_windows": int(len(X_train)),
+        "n_cal_windows": int(len(X_cal)),
+        "lookback": lookback,
+        "seed": seed,
     }
 
     return CalibratedForecastResult(
