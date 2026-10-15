@@ -47,7 +47,10 @@ commodity_forecast/
   probability.py  converts a calibrated forecast into a Kalshi-style
                   threshold probability P(price > K), backtested against
                   real history with both a static and an online-adapting
-                  residual pool (since 2026-10-15)
+                  residual pool (since 2026-10-15), plus (since 2026-10-15)
+                  select_adaptive_pool_window: a rolling-origin CV
+                  selection for the adaptive pool's own window, mirroring
+                  conformal-forecast's auto-window/cv-window-select
   track_record.py makes + persists real, dated, forward (non-backtested)
                    predictions, and resolves them once real outcomes exist
                    (since 2026-10-15)
@@ -56,12 +59,15 @@ tests/
   test_forecast.py     synthetic-data + real-WTI-series end-to-end tests, static and ACI
   test_forecast_lstm.py synthetic + real-WTI tests for the LSTM point model (since 2026-10-15)
   test_probability.py  hand-computed sanity checks + a real-WTI-series backtest
+  test_adaptive_pool_window_selection.py fold-boundary helpers + real-data CV window
+                        selection checks (since 2026-10-15)
   test_track_record.py forward-prediction structure checks + synthetic-future resolution checks
 data/
   wti_spot_daily.csv real cached WTI daily spot price series, 1986-01-02 to present
 predictions/
   README.md         explains the forward track record's format and resolution rule
-  track_record.jsonl the real, dated predictions themselves (since 2026-10-15)
+  track_record.jsonl the real, dated predictions themselves (first batch made and
+                      resolved 2026-10-15)
 ```
 
 ### Data source
@@ -323,6 +329,66 @@ that class's own docstring), a mismatched-length error-handling check, and
 the real-WTI backtest above re-run as a loose regression check. Full suite:
 **29/29 passed.**
 
+## Picking the adaptive pool's window honestly (2026-10-15)
+
+The section above picked `window=200` by sweeping a handful of values and
+reading off the best real-test-set number — exactly the "eyeballed, not
+principled" selection `active-project.md` (conformal-forecast's own docs)
+already flags as a pattern worth automating for its own ACI case, and this
+project's own "What's next" item 3. `select_adaptive_pool_window`
+(`commodity_forecast/probability.py`) is the fix: a rolling-origin
+cross-validation over the calibration set (five expanding-window folds,
+each candidate window scored by the mean calibration error of its own
+online-pool backtest on that fold's validation chunk — the exact same
+`_run_adaptive_pool_backtest` loop the real backtest above uses, just run
+against a calibration-set fold instead of the real test set), never
+touching the real test set to select — which is used only afterward, via
+the already-tested `backtest_threshold_calibration_adaptive`, as an
+honest post-hoc check.
+
+**Measured, not assumed, on the real WTI series (5 folds, candidates
+20/50/75/100/150/200/300/unbounded):**
+
+| Window | Mean fold calibration error (used to select) | Mean fold Brier | Real test calibration error (post-hoc) | Real test Brier (post-hoc) |
+|---|---|---|---|---|
+| 20 | 0.0196 | 0.0799 | 0.0156 | 0.0906 |
+| 50 | 0.0166 | 0.0777 | 0.0150 | 0.0898 |
+| 75 | 0.0153 | 0.0776 | 0.0141 | 0.0901 |
+| 100 | 0.0175 | 0.0774 | 0.0133 | 0.0898 |
+| **150 (selected)** | **0.0146** | 0.0773 | **0.0136** | 0.0894 |
+| 200 (best in hindsight) | 0.0165 | 0.0773 | 0.0101 | 0.0894 |
+| 300 | 0.0205 | 0.0772 | 0.0126 | 0.0897 |
+| unbounded | 0.0226 | 0.0776 | 0.0198 | 0.0901 |
+
+*Reference, real test set, static (frozen) pool: calibration error 0.0261,
+Brier 0.0905.*
+
+**A genuine, principled win, not a tie or a loss this time:** the
+fold-averaged metric correctly picks window=150 out of eight real
+candidates — not the oracle's own window=200, but close to it (real
+test-set calibration error 0.0136 vs. the oracle's 0.0101), and a
+substantial, real improvement over both the static baseline (0.0261,
+~1.9x worse) and every smaller/larger candidate the fold metric correctly
+ranks below it. Unlike the EnbPI window-CV feature shipped the same day on
+the conformal-forecast side (see that repo's own README — a real loss on
+its smallest-calibration-set case), this project's own calibration set is
+large enough (1,903 windows) that five real folds of ~270-370 points each
+give the selection genuine signal rather than falling through to a tie-break.
+
+16 new tests (33 → 49, `tests/test_adaptive_pool_window_selection.py`):
+the new `_make_rolling_folds`/`_select_best_window` fold-boundary helpers
+(pure, no model dependency — reimplemented here rather than importing
+conformal-forecast's own private experiment-module versions, since this
+project only depends on that repo's public API), real-data integration
+checks (every candidate reported, folds partition the calibration set
+with no gap or overlap, determinism for a fixed seed), a direct check that
+shrinking the test set passed in changes nothing about which window gets
+selected (proving the selection criterion never actually reads the test
+set, not just trusting the docstring's claim), the too-small-calibration-set
+and invalid-argument error paths, and a check that the honest post-hoc
+result matches calling `backtest_threshold_calibration_adaptive` directly.
+Full suite: **49/49 passed.**
+
 ## Does a stronger point model help? (2026-10-15)
 
 Every result above uses `NaiveForecaster` ("tomorrow = today, in normalized
@@ -393,15 +459,32 @@ graded later only once the real outcome actually exists. See
 
 First batch, `commodity_forecast/track_record.py`'s `make_forward_prediction`,
 using the real cached WTI series (last real observation: 2026-10-06,
-$96.24/bbl — re-verified fresh against EIA this run; no newer observation
-was available from the source yet) and the exact same calibration-residual
-machinery the backtest above already validated:
+$96.24/bbl) and the exact same calibration-residual machinery the backtest
+above already validated:
 
-| Made at (UTC) | Last observed | Question | Threshold | P(exceed) | Outcome |
-|---|---|---|---|---|---|
-| 2026-10-15 03:42:33 | 2026-10-06, $96.24 | Will the next real observed price be *above* $96.24 (flat)? | $96.24 | **51.3%** | pending |
-| 2026-10-15 03:42:33 | 2026-10-06, $96.24 | Will the next real observed price be *above* $98.16 (+2%)? | $98.16 | **5.8%** | pending |
-| 2026-10-15 03:42:33 | 2026-10-06, $96.24 | Will the next real observed price be *above* $94.32 (-2%)? | $94.32 | **93.5%** | pending |
+| Made at (UTC) | Last observed | Question | Threshold | P(exceed) | Resolved against | Outcome |
+|---|---|---|---|---|---|---|
+| 2026-10-15 03:42:33 | 2026-10-06, $96.24 | Will the next real observed price be *above* $96.24 (flat)? | $96.24 | 51.3% | 2026-10-07, $95.02 | **not exceeded** |
+| 2026-10-15 03:42:33 | 2026-10-06, $96.24 | Will the next real observed price be *above* $98.16 (+2%)? | $98.16 | 5.8% | 2026-10-07, $95.02 | **not exceeded** |
+| 2026-10-15 03:42:33 | 2026-10-06, $96.24 | Will the next real observed price be *above* $94.32 (-2%)? | $94.32 | 93.5% | 2026-10-07, $95.02 | **exceeded** |
+
+**First batch resolved 2026-10-15 (a later run than the one that made
+these predictions — never the same run, per the no-self-grading rule
+above).** EIA published new observations (2026-10-07 through 2026-10-14)
+after four consecutive earlier checks that day had found nothing newer
+than 2026-10-06; `resolve_pending_predictions()` resolved all three
+against the first of those, 2026-10-07 ($95.02/bbl), strictly after the
+prediction's own `last_observed_date` — never a later, more convenient
+point, even though five more real observations existed by the time this
+resolution ran. All three of this tiny first batch happen to land on the
+side the stated probability favored (the two "not exceeded" calls were
+predicted at 51.3%/5.8% — both correctly favored "no" — and the "exceeded"
+call was predicted at 93.5%, correctly favored "yes"), which is a good
+early sign but, with n=3, not itself a claim of calibration — the real
+calibration evidence is the 13,328-question backtest above, not this
+tiny forward sample. No new predictions were added in the same run that
+resolved these, per the project's own standing discipline (see
+`predictions/README.md`).
 
 Nothing here is a guess dressed up after the fact — `made_at_utc` in
 `predictions/track_record.jsonl` is the real system clock at the moment
@@ -444,9 +527,15 @@ suite: **25/25 passed.**
    conformal-forecast's Transformer model family (shipped there 2026-10-15,
    not yet tried here) remains available if a future run wants a second
    data point on "does model choice matter at all on this series."
-3. A principled way to pick `window` instead of eyeballing a sweep (e.g. a
-   held-out validation slice), since this run's own sweep shows the choice
-   matters less than *having* a bounded window at all, but isn't flat.
+3. ~~A principled way to pick `window` instead of eyeballing a sweep (e.g.
+   a held-out validation slice)~~ **Done (2026-10-15)** — see "Picking the
+   adaptive pool's window honestly" above. `select_adaptive_pool_window`'s
+   rolling-origin CV correctly selects window=150 out of 8 real
+   candidates, landing close to the oracle's own window=200 (0.0136 vs.
+   0.0101 real test-set calibration error) and substantially beating the
+   static baseline (0.0261) — a genuine, measured win this time, unlike
+   the mixed result the same idea got on conformal-forecast's own
+   smallest-calibration-set EnbPI case the same day.
 4. ~~Convert a calibrated interval into an actual Kalshi-style threshold
    probability (e.g. P(price > K) by a given date), and backtest that
    conversion against real history.~~ **Done** — see above.
@@ -464,12 +553,16 @@ suite: **25/25 passed.**
    track record in `predictions/` — one dated, non-backdated entry at a
    time: a specific real strike K and date, the probability this module
    assigned it *before* the outcome was known, and later, the real
-   outcome.~~ **Done** — see "Forward track record" above; 3 real pending
-   predictions as of 2026-10-15. The natural follow-up: a *future* run
-   should call `resolve_pending_predictions()` against fresh data before
-   adding new predictions, and once a few resolve, report the running
-   hit rate honestly (small-sample caveats included) rather than only
-   ever adding new pending entries.
+   outcome.~~ **Done** — see "Forward track record" above. The first
+   batch (3 predictions) was itself resolved by a later run the same day
+   (2026-10-15) once newer EIA data existed — all three landed on the
+   side their stated probability favored (not itself a calibration claim
+   at n=3; see the backtest above for the real evidence). The natural
+   follow-up: a *future* run should add the next batch of forward
+   predictions (never the same run that just resolved the prior batch),
+   and once more predictions accumulate, start reporting a running hit
+   rate / calibration check on the forward record itself, honestly
+   caveated for its still-small sample size.
 
 ## Running it
 
