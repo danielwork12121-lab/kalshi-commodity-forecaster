@@ -61,3 +61,11 @@ README's "Forward track record" section for the resolved outcomes. No new
 predictions were added in the run that resolved these, per the
 no-self-grading rule above — a future run should add the next batch
 separately.
+
+**Second batch (3 predictions, made 2026-10-15T22:46 UTC against the
+2026-10-14 observation, $101.91/bbl)** was added by a later, separate run
+— never the run that resolved the first batch. All three are still
+`"pending"` as of this writing; EIA had not published anything newer than
+2026-10-14 at the time they were made. A future run should resolve them
+once newer data exists, and should not add a third batch in that same
+run, per the no-self-grading rule above.
