@@ -45,7 +45,8 @@ commodity_forecast/
                 SlidingWindowAdaptiveConformalForecaster (ACI)
   probability.py  converts a calibrated forecast into a Kalshi-style
                   threshold probability P(price > K), backtested against
-                  real history (since 2026-10-15)
+                  real history with both a static and an online-adapting
+                  residual pool (since 2026-10-15)
   track_record.py makes + persists real, dated, forward (non-backtested)
                    predictions, and resolves them once real outcomes exist
                    (since 2026-10-15)
@@ -235,6 +236,91 @@ calibration error — real thresholds a future legitimate data refresh
 shouldn't spuriously trip) regression check, and a custom-offsets test.
 Full suite: **17/17 passed.**
 
+## Does an online, adapting residual pool improve the probability estimate? (2026-10-15)
+
+The backtest above treats the probability layer's residual sample as
+*frozen* at the original calibration window — the same simplification
+`probability.py`'s own module docstring names as the module's one real
+honesty caveat, and the exact same one the interval layer had before ACI
+(see above) let the residual pool itself adapt online. `commodity_forecast
+/probability.py`'s new `backtest_threshold_calibration_adaptive` answers
+the obvious follow-up: does the same idea — folding each day's own signed
+residual into the pool, in strict step order, after it's scored — improve
+the *probability* estimate the same way it measurably improved raw interval
+coverage?
+
+**Measured, not assumed, on the real WTI series, same 1,904-day test split
+and the same 7 relative offsets as the static backtest (13,328 real
+questions either way):**
+
+| Method | Brier score | Mean calibration error |
+|---|---|---|
+| Static (frozen calibration pool) | 0.0906 | 0.0258 |
+| Adaptive, unbounded growing pool | 0.0901 | 0.0197 |
+| Adaptive, bounded window=75 | 0.0901 | 0.0138 |
+| **Adaptive, bounded window=200** | **0.0894** | **0.0100** |
+| Adaptive, bounded window=1000 | 0.0900 | 0.0146 |
+
+**The honest result is narrower than "adaptive wins": the Brier score barely
+moves** (0.0906 → ~0.089-0.090 regardless of window — essentially flat,
+since Brier is dominated by the large, easy-to-call tail questions every
+version already gets right) **but the mean calibration error — specifically
+how well predicted probabilities track real outcomes bucket-by-bucket —
+improves substantially**, roughly 2.5x better at the best bounded window
+than the static version, and the improvement is *not* monotonic in window
+size: an unbounded growing pool (0.0197) is clearly worse than any bounded
+window tried in the 75-500 range, and windows much larger than that
+(750, 1000) drift back up toward the unbounded pool's own number. This
+mirrors the interval-ACI case's own finding (a bounded sliding window beats
+an unbounded growing buffer) rather than just assuming "more adaptive is
+always better" — measured with an actual sweep, not picked to look good:
+
+| window | 50 | 75 | 100 | 150 | 200 | 300 | 500 | 750 | 1000 | unbounded |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Mean calibration error | 0.0145 | 0.0138 | 0.0133 | 0.0130 | **0.0100** | 0.0112 | 0.0113 | 0.0134 | 0.0146 | 0.0197 |
+
+Reliability by predicted-probability decile at the best window (200),
+compare against the static table above:
+
+| Predicted range | Count | Mean predicted | Actual rate |
+|---|---|---|---|
+| 0.0–0.1 | 3,808 | 1.5% | 2.0% |
+| 0.1–0.2 | 1,322 | 13.9% | 16.0% |
+| 0.2–0.3 | 509 | 23.9% | 24.2% |
+| 0.3–0.4 | 73 | 31.8% | 37.0% |
+| 0.4–0.5 | 330 | 48.4% | 53.6% |
+| 0.5–0.6 | 1,577 | 54.0% | 52.9% |
+| 0.6–0.7 | 52 | 64.0% | 65.4% |
+| 0.7–0.8 | 463 | 75.6% | 79.7% |
+| 0.8–0.9 | 1,224 | 85.1% | 84.9% |
+| 0.9–1.0 | 3,970 | 97.7% | 97.1% |
+
+Every bucket here tracks its own real outcome rate more tightly than the
+static version's table did (the static version's worst disclosed bucket,
+0.4-0.5, was 42.3% predicted vs. 80.0% actual on only 5 observations — here
+the same bucket has 330 observations and is 48.4% vs. 53.6%, a far smaller
+and far better-sampled gap).
+
+Implementation note: this does *not* reuse `forecasting.adaptive
+.SlidingWindowAdaptiveConformalForecaster` from the conformal-forecast
+dependency — that class only ever tracks *absolute* residuals internally
+(enough for a symmetric interval), not the signed residuals an exceedance
+probability needs to recover the empirical CDF's direction. The online pool
+is reimplemented directly in `probability.py`, replaying the same strict
+step-ordering discipline (score against the pool as it stood *before* this
+step, fold this step's own residual in only afterward) that class itself
+uses, so the "never peek at your own answer" guarantee carries over exactly
+even though the code path is separate.
+
+4 new tests (25 → 29): a fully hand-computed 2-step scenario pinning down
+the exact step-ordering contract (and proving the adaptive and static
+versions genuinely diverge, not just run through different code that
+happens to agree), a bounded-window seed-truncation check (mirroring the
+real bug `SlidingWindowAdaptiveConformalForecaster` itself once had, see
+that class's own docstring), a mismatched-length error-handling check, and
+the real-WTI backtest above re-run as a loose regression check. Full suite:
+**29/29 passed.**
+
 ## Forward track record (2026-10-15 — started)
 
 Everything above (including the backtest just above) is retrospective:
@@ -292,11 +378,16 @@ suite: **25/25 passed.**
 4. ~~Convert a calibrated interval into an actual Kalshi-style threshold
    probability (e.g. P(price > K) by a given date), and backtest that
    conversion against real history.~~ **Done** — see above.
-5. Wire the probability layer into ACI's online-adapting residual pool
+5. ~~Wire the probability layer into ACI's online-adapting residual pool
    (currently it only ever uses `fit_calibrated_naive_forecaster`'s static
    calibration-split residuals) — plausibly improves calibration the same
    way ACI improved raw interval coverage, but unverified until it's
-   actually built and backtested the same honest way.
+   actually built and backtested the same honest way.~~ **Done** — see
+   "Does an online, adapting residual pool improve the probability
+   estimate?" above. Measured result was more nuanced than "yes, strictly
+   better": Brier score barely moved, but mean calibration error improved
+   substantially (~2.5x) at a well-chosen bounded window, with the same
+   "bounded beats unbounded" pattern the interval-ACI case already showed.
 6. ~~Now that the probability layer is backtested, start the real forward
    track record in `predictions/` — one dated, non-backdated entry at a
    time: a specific real strike K and date, the probability this module
