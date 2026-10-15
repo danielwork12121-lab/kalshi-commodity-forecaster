@@ -12,12 +12,13 @@ specifically so a downstream project like this one can depend on it rather
 than reimplementing a second, possibly-drifting version), its
 `SplitConformalForecaster`, and its baseline models.
 
-Honest scope, as of this first slice: point forecast + calibrated interval
-on one real series (WTI daily spot price), using the simplest baseline
-model. Converting an interval into a Kalshi-style threshold probability
-(e.g. P(price > K)), backtesting that conversion against real history, and
-trying a stronger model than the naive baseline are explicitly NOT done yet
--- see the project README's "What's next."
+Honest scope, as of this slice: point forecast + calibrated interval on one
+real series (WTI daily spot price), using the simplest baseline model, plus
+(since 2026-10-15, see `commodity_forecast/probability.py`) converting that
+calibrated output into a Kalshi-style threshold probability, P(price > K),
+backtested against real history. Trying a stronger model than the naive
+baseline is explicitly NOT done yet -- see the project README's "What's
+next."
 """
 
 from __future__ import annotations
@@ -42,6 +43,15 @@ class CalibratedForecastResult:
     normalizer_mean: float
     normalizer_std: float
     diagnostics: dict
+    # Signed (not absolute) calibration-split residuals, in normalized
+    # (z-score) units: y_cal - model.predict(X_cal). `SplitConformalForecaster`
+    # itself only ever keeps the *absolute* residuals' quantile (`q_hat`) --
+    # enough for a symmetric +/- interval, not enough to convert a forecast
+    # into a threshold probability, which needs the actual shape (and sign)
+    # of the residual distribution. Added 2026-10-15 for
+    # `commodity_forecast/probability.py`; unused by anything built before
+    # that date.
+    cal_residuals_normalized: np.ndarray
 
 
 @dataclass
@@ -102,6 +112,11 @@ def fit_calibrated_naive_forecaster(
     y_test_denorm = normalizer.inverse_transform(y_test)
     mae_usd = float(np.mean(np.abs(point_denorm - y_test_denorm)))
 
+    # Signed calibration residuals, normalized units -- the model is already
+    # fit (above), so this is a free extra prediction call on the held-out
+    # calibration split, never the test split.
+    cal_residuals_normalized = (y_cal - conformal.model.predict(X_cal)).reshape(-1)
+
     diagnostics = {
         **coverage,
         "mae_usd_per_bbl": mae_usd,
@@ -113,6 +128,7 @@ def fit_calibrated_naive_forecaster(
     return CalibratedForecastResult(
         conformal_forecaster=conformal,
         normalizer_mean=normalizer.mean_,
+        cal_residuals_normalized=cal_residuals_normalized,
         normalizer_std=normalizer.std_,
         diagnostics=diagnostics,
     )
