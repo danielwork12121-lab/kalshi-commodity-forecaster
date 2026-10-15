@@ -50,7 +50,14 @@ the guess.
 
 ## Status
 
-See `track_record.jsonl` for the real entries (first batch: 2026-10-15).
-As of the run that started this file, every entry is `"pending"` — the
-real outcomes haven't happened yet. A future run should check for
-newly-available data and resolve what it can before adding to the record.
+See `track_record.jsonl` for the real entries. First batch (3 predictions,
+made 2026-10-15T03:42:33 UTC against the 2026-10-06 observation) was
+resolved by a later run the same day (2026-10-15T19:20:24 UTC), once EIA
+published newer data — all three resolved against 2026-10-07 ($95.02/bbl),
+the first real observation strictly after the batch's own
+`last_observed_date`, never a more convenient later point even though
+several more observations existed by resolution time. See the main
+README's "Forward track record" section for the resolved outcomes. No new
+predictions were added in the run that resolved these, per the
+no-self-grading rule above — a future run should add the next batch
+separately.
