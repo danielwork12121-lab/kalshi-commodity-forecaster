@@ -88,13 +88,24 @@ calibration logic is reimplemented here — this project only ever calls into
 | MAE | $1.43/bbl |
 | Nominal coverage | 90% |
 | **Empirical coverage** | **80.9%** (a real, reported gap — not hidden) |
-| Mean interval width | $0.16/bbl |
+| Mean interval width | $4.18/bbl |
 
 The coverage gap is real and expected: split conformal's guarantee assumes
 calibration/test residual exchangeability, which a non-stationary real
 commodity series (this one includes the real 2020 negative-price event,
 -$36.98/bbl) only approximately satisfies — the same limitation
 `conformal-forecast`'s own README documents for its own LSTM/airline case.
+
+*Correction (2026-10-15): the mean interval width above was originally
+reported as $0.16/bbl — that was actually the width in normalized
+(z-score) units (`result.diagnostics["mean_interval_width"]`), never
+multiplied through by `result.normalizer_std` to convert it to real
+dollars the way the MAE row already was. The real, denormalized width is
+$4.18/bbl (`0.1582 (normalized) * 26.428 (this series' std, $/bbl) =
+$4.18`), confirmed directly against `result.normalizer_std` on the real
+pushed code. Every mean-interval-width figure in the ACI comparison
+table below is corrected the same way; nothing else in either table was
+affected (coverage and MAE were already computed/reported correctly).
 
 ## Does Adaptive Conformal Inference close the gap? (measured honestly, this run)
 
@@ -106,10 +117,10 @@ the way they already help on `conformal-forecast`'s own airline benchmark.
 
 | Method | Empirical coverage | Gap vs. 90% nominal | Mean interval width |
 |---|---|---|---|
-| Static split conformal (baseline, above) | 80.9% | **-9.1pp** | $0.16/bbl |
-| ACI, fixed calibration pool | 87.4% | -2.6pp | $0.21/bbl |
-| ACI, sliding pool (unbounded/growing) | 88.4% | -1.6pp | $0.27/bbl |
-| ACI, sliding pool, `window=75` | **89.8%** | **-0.2pp** | $0.24/bbl |
+| Static split conformal (baseline, above) | 80.9% | **-9.1pp** | $4.18/bbl |
+| ACI, fixed calibration pool | 87.4% | -2.6pp | $5.49/bbl |
+| ACI, sliding pool (unbounded/growing) | 88.4% | -1.6pp | $7.13/bbl |
+| ACI, sliding pool, `window=75` | **89.8%** | **-0.2pp** | $6.42/bbl |
 
 **Yes, substantially — a bounded sliding-window pool nearly closes it.**
 Both ACI variants meaningfully reduce the gap over static conformal, and a
@@ -129,10 +140,10 @@ online (sliding variant) removes the ceiling; bounding the window (rather
 than an unbounded growing buffer) additionally lets the pool forget residuals
 from early, less-representative stretches of a 40-year series, which is
 likely why a bounded window outperforms the unbounded growing buffer here.
-The interval does get wider to earn that coverage ($0.16 → ~$0.24/bbl mean
-width) — an honest cost, not a free lunch: a correctly-calibrated 90%
-interval on this series is genuinely closer to $0.24/bbl wide than $0.16,
-and static conformal's narrower interval was narrower because it was
+The interval does get wider to earn that coverage ($4.18 → $6.42/bbl mean
+width, window=75) — an honest cost, not a free lunch: a correctly-calibrated
+90% interval on this series is genuinely closer to $6.42/bbl wide than
+$4.18, and static conformal's narrower interval was narrower because it was
 systematically under-covering, not because it was more accurate.
 
 Verified directly, not assumed: `fit_adaptive_naive_forecaster` (in
