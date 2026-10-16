@@ -18,7 +18,10 @@ produces calibrated probability estimates for commodity-linked questions and
 publishes the code and backtest results. It gives no financial advice. (A
 separate, unrelated, currently-disabled automation under a different project
 researches and stages real Kalshi trades on the author's own account — this
-repository has no connection to that one.)
+repository has no connection to that one.) This includes `edge.py` (added
+2026-10-16, see "Edge vs. a real market price" below): it reads real, public
+Kalshi market data and sizes/logs **paper-only, simulated** bets for
+analysis purposes — no real order, position, or account is ever involved.
 
 ## No-fabrication commitment
 
@@ -54,6 +57,20 @@ commodity_forecast/
   track_record.py makes + persists real, dated, forward (non-backtested)
                    predictions, and resolves them once real outcomes exist
                    (since 2026-10-15)
+  kalshi_client.py (since 2026-10-16) real, public, unauthenticated Kalshi
+                   market-data client (series/markets/orderbook), with real
+                   retry/backoff on the real rate limiting this project
+                   independently confirmed while building it
+  edge.py          (since 2026-10-16) compares this project's own
+                   calibrated probability against a real, live Kalshi
+                   market's own implied probability, with explicit,
+                   structured honesty caveats (settlement-benchmark
+                   mismatch, illiquidity, forecast-horizon mismatch --
+                   see "Edge vs. a real market price" below) attached to
+                   every estimate, plus conservative fractional-Kelly
+                   paper-bet sizing and a real, forward, non-backdated
+                   paper track record -- never real money, never a real
+                   order
 tests/
   test_data.py         date-math unit test + live EIA integration test + cache-hit test
   test_forecast.py     synthetic-data + real-WTI-series end-to-end tests, static and ACI
@@ -62,12 +79,23 @@ tests/
   test_adaptive_pool_window_selection.py fold-boundary helpers + real-data CV window
                         selection checks (since 2026-10-15)
   test_track_record.py forward-prediction structure checks + synthetic-future resolution checks
+  test_kalshi_client.py (since 2026-10-16) parses real captured Kalshi API
+                        responses (tests/fixtures/), checks real 429
+                        retry/backoff, plus one live integration test
+                        against the real production API
+  test_edge.py          (since 2026-10-16) hand-computed Kelly-sizing
+                        checks, honesty-caveat checks, and paper-bet
+                        append/load/resolve round-trips
 data/
   wti_spot_daily.csv real cached WTI daily spot price series, 1986-01-02 to present
 predictions/
   README.md         explains the forward track record's format and resolution rule
   track_record.jsonl the real, dated predictions themselves (first batch made and
                       resolved 2026-10-15)
+  paper_bets.jsonl  (since 2026-10-16) real, timestamped, paper-only
+                     (never executed) simulated bets sized by edge.py,
+                     resolved later against each market's own real
+                     settlement result
 ```
 
 ### Data source
@@ -521,6 +549,92 @@ than 2026-10-14 at the time these were made (confirmed via a fresh
 yet for any of them to resolve against. A later run should resolve these
 once newer data exists, never this one.
 
+## Edge vs. a real market price (2026-10-16 — real data, honest negative finding)
+
+Daniel asked, live in chat on 2026-10-16, for a project whose story is "I
+use this data to predict that data, and thus I've made a calculated bet
+that beats the edge, and I'm profitable." This section is the real,
+honest first step toward that — and an honest report that it isn't there
+yet, with the specific, concrete reasons why, found by actually building
+and running the real pipeline rather than assumed in advance.
+
+**Kalshi really does expose genuine, public, live market data with no
+login or trading account required** — confirmed against Kalshi's own docs
+(`docs.kalshi.com/getting_started/quick_start_market_data`: *"No
+authentication headers are required..."*) and independently, live, against
+the real production API on 2026-10-16 (`commodity_forecast/kalshi_client.py`,
+`tests/fixtures/kxwti_*_live_2026-10-16.json` — byte-for-byte real captures,
+not hand-written). `KXWTI` (daily WTI threshold markets, e.g. "Will WTI
+settle above $95.49 on Oct 16, 2026?") is a real series with real, live
+strikes and, for many of them, real trading volume — this is not a toy or
+a sandbox/demo environment.
+
+**Building the actual comparison surfaced two honest reasons not to trust
+a naive edge number yet** (a third, illiquidity, is also checked but
+wasn't the binding issue in the example below, which used a genuinely
+liquid market):
+
+1. **Settlement-benchmark mismatch.** `KXWTI`'s own series metadata
+   (`kalshi_client.fetch_series("KXWTI")["settlement_sources"]`) states it
+   settles against the **ICE WTI Crude Futures front-month contract's**
+   daily settlement price. This project's forecaster predicts the **EIA
+   Cushing spot price** — a real, correlated, but genuinely different
+   number.
+2. **Forecast-horizon mismatch.** `fit_calibrated_naive_forecaster` is only
+   ever validated one trading day ahead. Several real, liquid `KXWTI`
+   markets close 2+ days out; naively reusing the one-day residual pool
+   that far out is an unvalidated extrapolation.
+
+**The real, live illustrative run (2026-10-16, refreshed EIA data, last
+real observation 2026-10-14 at $101.91/bbl, compared against the real
+`KXWTI-26OCT1614-*` ladder closing 2 real days later):**
+
+| Strike | Our P(exceed) | Market P(exceed) (bid/ask mid) | Raw "edge" | Volume | Trustworthy? |
+|---|---|---|---|---|---|
+| $93.99 | 100.0% | 87.0% | +0.130 | 1,398.6 | No (horizon + benchmark) |
+| $95.49 | 99.9% | 56.5% | +0.434 | 1,454.0 | No (horizon + benchmark) |
+| $96.99 | 99.6% | 22.5% | +0.771 | 3,834.1 | No (horizon + benchmark) |
+| $98.49 | 98.8% | 5.5% | +0.933 | 326.3 | No (horizon + benchmark) |
+| $99.99 | 93.5% | 1.0% | +0.925 | 76.6 | No (horizon + benchmark) |
+
+Every one of these markets had **real, non-zero trading volume** — the raw
+"edge" column is not an artifact of a stale, untraded quote. Read naively,
+this table looks spectacular (up to 93 percentage points of "edge"). It
+almost certainly is not real skill: `edge.py`'s `compute_edge` flags every
+single row above as untrustworthy, for the two structural reasons stated
+above, not a one-off disclaimer in prose — `EdgeEstimate.trustworthy` is
+`False` for each of them, and `size_paper_bet` refuses to size a paper bet
+on any of them as a direct, code-level consequence (see `edge.py`'s own
+module docstring and tests for the enforcement, not just the claim).
+
+**This is the honest finding, not a dead end**, consistent with this
+project's standing discipline of reporting what's real rather than what
+looks good (see the LSTM "no measurable improvement" and the coverage-gap
+results above). No "profitable, beats-the-edge" claim is made here, and
+none should be until the two structural issues are actually resolved —
+which is now a concrete engineering problem, not an open question, thanks
+to today's real data:
+
+- **Horizon**: extend `forecast.py` with a genuinely multi-step-ahead
+  forecaster (or a separately-validated calibration residual pool *per*
+  horizon, e.g. 1-day/2-day/3-day), and backtest its own coverage/
+  calibration the same honest way every existing model here already is —
+  not assumed, measured.
+- **Benchmark**: either source a real, free historical series for ICE WTI
+  front-month futures settlement prices (to recalibrate against the actual
+  thing `KXWTI` settles on, or at minimum to measure the real spot/futures
+  basis so it can be corrected for honestly), or find a different real
+  Kalshi series that settles against EIA's own published index directly
+  (not yet searched for).
+
+`edge.py`'s paper-bet machinery (`size_paper_bet`, `PaperBet`,
+`resolve_pending_paper_bets`) is real and tested end-to-end (conservative
+quarter-Kelly, capped, resolved later against each market's own real
+settlement result, never against this project's own forecast) — it is
+simply not yet fed a trustworthy edge to act on. The first real paper bet
+this project logs should be on a market where both issues above are
+actually resolved, not merely ignored.
+
 ## What's next
 
 1. ~~Try `conformal-forecast`'s existing Adaptive Conformal Inference
@@ -585,6 +699,14 @@ once newer data exists, never this one.
    batches, start reporting a running hit rate / calibration check on the
    forward record itself, honestly caveated for its still-small sample
    size.
+7. **(New, 2026-10-16) Make the real Kalshi edge comparison trustworthy.**
+   See "Edge vs. a real market price" above for the two concrete, real
+   issues found (settlement-benchmark mismatch: EIA spot vs. ICE futures;
+   forecast-horizon mismatch: 1-day-validated model vs. 2+-day-out real
+   markets) and the specific engineering path to resolving each. Only once
+   at least one real market passes both checks should this project log its
+   first real (paper-only) bet via `edge.py`'s already-built and tested
+   `size_paper_bet` / `PaperBet` / `resolve_pending_paper_bets` machinery.
 
 ## Running it
 
