@@ -635,6 +635,51 @@ simply not yet fed a trustworthy edge to act on. The first real paper bet
 this project logs should be on a market where both issues above are
 actually resolved, not merely ignored.
 
+### Investigating alternative settlement benchmarks (2026-10-16, continued)
+
+The "Benchmark" item above asks whether a different real Kalshi series
+settles against EIA's own published index directly, removing the
+settlement-benchmark mismatch outright. Checked for real, live, directly
+against Kalshi's production API (not assumed from a series name):
+
+- Pulled the full live series listing for `category=Commodities`
+  (`GET /series?category=Commodities`) and checked every WTI-related
+  ticker's own `settlement_sources` field directly — `KXWTI` (daily,
+  what this project already compares against) and `KXWTIMONTHLY` both
+  settle against **ICE**, same as documented above.
+- Two series, `KXWTI15M` ("WTI 15-minute") and `KXWTIH` ("WTI Hourly"),
+  settle against a *different* real source: **"Pyth - WTI"**, a
+  continuous market-data index (`Commodities.Index.PYTHOIL/USD`), not
+  ICE futures. `KXWTIH`'s own series metadata states this plainly: as of
+  2026-07-30 it "transitions to a static 24/5 index feed... operating
+  without intraday breaks," replacing rolling front-month futures
+  contracts entirely.
+- **Honest finding: this doesn't actually resolve the caveat, it changes
+  its shape.** Pyth's WTI index is a continuous, real-time market price
+  feed — arguably closer in spirit to "spot" than a monthly futures
+  settlement — but it is still not the EIA Cushing, OK spot price this
+  project's forecaster is calibrated on (a different venue and
+  methodology: a market-data oracle vs. a government-published,
+  delivery-point-specific survey price). No Kalshi series was found that
+  settles directly against the EIA series itself. A real, live
+  comparison (2026-10-16, ~16:45 UTC): the nearest-the-money open
+  `KXWTI15M` market had `floor_strike` $98.04, against the cached EIA
+  spot series' last value of $101.91/bbl — but that EIA value is dated
+  2026-10-14, two days stale, so this ~$3.87 gap is **not** a clean,
+  same-day basis measurement and isn't used as one here.
+- **A second, compounding problem with `KXWTI15M`/`KXWTIH` specifically:**
+  they resolve on a 15-minute/1-hour horizon — even further from this
+  project's 1-day-ahead validated forecast than `KXWTI`'s own daily
+  close, so neither is a cleaner drop-in replacement on the horizon axis
+  either, even setting the benchmark question aside.
+- **Conclusion:** the "find a different series" path is now checked and
+  doesn't pan out — the real next step for the Benchmark issue remains
+  sourcing a real historical ICE WTI futures series (to measure and
+  correct the actual spot/futures basis against `KXWTI`, the series
+  whose daily horizon already matches this project's own), not switching
+  series. The Horizon issue (a genuine multi-step-ahead forecaster) is
+  unaffected either way and remains open.
+
 ## What's next
 
 1. ~~Try `conformal-forecast`'s existing Adaptive Conformal Inference
@@ -707,6 +752,16 @@ actually resolved, not merely ignored.
    at least one real market passes both checks should this project log its
    first real (paper-only) bet via `edge.py`'s already-built and tested
    `size_paper_bet` / `PaperBet` / `resolve_pending_paper_bets` machinery.
+   ~~Check whether a different real Kalshi series settles against EIA's
+   own index directly, removing the benchmark mismatch outright.~~
+   **Checked (2026-10-16)** — see "Investigating alternative settlement
+   benchmarks" above. Honest result: no such series exists; the two
+   Pyth-settled alternatives found (`KXWTI15M`, `KXWTIH`) swap the
+   benchmark problem for a different one rather than removing it, and
+   make the horizon mismatch worse, not better. The real remaining path
+   is sourcing a historical ICE WTI futures series to measure/correct the
+   basis against `KXWTI` directly, or building a genuine multi-step-ahead
+   forecaster — neither attempted yet.
 
 ## Running it
 
