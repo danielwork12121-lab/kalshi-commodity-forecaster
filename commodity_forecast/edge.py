@@ -88,6 +88,45 @@ from commodity_forecast.kalshi_client import KalshiMarketQuote
 PAPER_BETS_DIR = pathlib.Path(__file__).resolve().parent.parent / "predictions"
 DEFAULT_PAPER_LOG_PATH = PAPER_BETS_DIR / "paper_bets.jsonl"
 
+# The real, honestly-measured horizons `forecast.fit_calibrated_naive_forecaster_horizon`
+# has been validated at (see README "Resolving the forecast-horizon mismatch,
+# 2026-10-17" and `tests/test_forecast_horizon.py`) -- added specifically to
+# answer the forecast-horizon-mismatch caveat below with a real residual
+# pool measured at the actual horizon in question, instead of always
+# borrowing the one-day pool. Kept here (not in `forecast.py`) since this
+# is about which horizons this project has chosen to validate and expose
+# for real market matching, not a property of the forecaster itself.
+VALIDATED_FORECAST_HORIZONS_DAYS: tuple[int, ...] = (1, 2, 3, 5, 10, 15, 21)
+
+
+def pick_validated_horizon(days_to_close: float, horizons: tuple[int, ...] = VALIDATED_FORECAST_HORIZONS_DAYS):
+    """The smallest validated horizon that is >= `days_to_close`, or `None`
+    if `days_to_close` exceeds every validated horizon.
+
+    Deliberately rounds *up* to the nearest validated horizon rather than
+    down (e.g. a market closing in 4 real days gets horizon=5's residual
+    pool, not horizon=3's) -- using a residual pool measured slightly
+    *further out* than actually needed is conservative (a real, if
+    possibly slightly too wide, calibration), while rounding down would
+    reintroduce exactly the kind of unvalidated extrapolation this
+    function exists to avoid. Returns `None` when nothing in `horizons`
+    covers `days_to_close` -- callers should fall back to flagging the
+    forecast-horizon-mismatch caveat in that case, not guess further.
+
+    Note: `days_to_close` is real calendar days (from a market's own
+    `close_time`), while a validated `horizon` is a count of rows in this
+    project's own EIA spot series -- which only has entries on real
+    trading days (no weekends/holidays; confirmed directly against the
+    cached series). This is a known, small approximation (one existing
+    since this project's very first one-day-ahead framing, not new here)
+    -- a market closing in exactly 5 calendar days spanning a weekend
+    really only needs ~3-4 trading-day-ahead calibration, so rounding up
+    to the next validated horizon is, if anything, an extra-conservative
+    (wider) interval, not an understated one.
+    """
+    candidates = [h for h in horizons if h >= days_to_close]
+    return min(candidates) if candidates else None
+
 # A real, stated, conservative fractional-Kelly cap -- never full Kelly (full
 # Kelly is famously overaggressive under any real model-probability error,
 # and this project's own model is already honestly known to be imperfect --
