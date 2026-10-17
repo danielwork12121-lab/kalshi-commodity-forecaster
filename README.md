@@ -774,6 +774,27 @@ down, one to go: the next real engineering step is unchanged from the
 "What's next" item below — sourcing a historical ICE WTI futures series to
 measure and correct that basis directly.
 
+**A first, real attempt at that next step (2026-10-17) — a negative
+finding, worth recording so a future run doesn't retread it:** EIA itself
+publishes a real, free, no-API-key daily *NYMEX* WTI front-month futures
+settlement series (`RCLC1`, "Cushing, OK Crude Oil Future Contract 1"),
+served the same way as the spot series this project already uses
+(`https://www.eia.gov/dnav/pet/hist_xls/RCLC1d.xls`). Confirmed real by
+actually downloading and parsing it, not assumed from its name. **It
+stopped being updated in April 2024** (10,183 real rows, the last dated
+2024-04-05) — EIA has discontinued this series, so it cannot be used to
+measure or correct today's real spot/futures basis against a live market.
+It also measures the NYMEX WTI contract specifically, not the ICE WTI
+contract `KXWTI` actually settles against — a related but genuinely
+different futures contract, so even a current RCLC1 would only ever have
+been an approximate proxy for the real ICE basis, not an exact one. The
+real remaining path for the Benchmark issue is therefore either a
+paid/API-key data vendor for live ICE WTI futures settlement prices (a
+real cost/access decision for Daniel, not taken on unilaterally), or an
+explicitly-caveated historical-average-basis estimate computed from
+RCLC1's own stale overlap with the spot series (not a live correction,
+and not yet attempted).
+
 ## What's next
 
 1. ~~Try `conformal-forecast`'s existing Adaptive Conformal Inference
