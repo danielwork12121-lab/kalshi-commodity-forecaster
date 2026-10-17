@@ -46,7 +46,12 @@ commodity_forecast/
   forecast.py   wraps conformal-forecast's prepare_split_from_series + SplitConformalForecaster
                 (static calibration, naive baseline or -- since 2026-10-15 --
                 an LSTM via fit_calibrated_lstm_forecaster) and
-                AdaptiveConformalForecaster / SlidingWindowAdaptiveConformalForecaster (ACI)
+                AdaptiveConformalForecaster / SlidingWindowAdaptiveConformalForecaster (ACI);
+                plus (since 2026-10-17) prepare_horizon_split /
+                fit_calibrated_naive_forecaster_horizon -- a genuine
+                multi-step-ahead forecaster, composing conformal-forecast's
+                own make_windows(horizon=...) a second way rather than
+                modifying that shared library
   probability.py  converts a calibrated forecast into a Kalshi-style
                   threshold probability P(price > K), backtested against
                   real history with both a static and an online-adapting
@@ -70,7 +75,12 @@ commodity_forecast/
                    every estimate, plus conservative fractional-Kelly
                    paper-bet sizing and a real, forward, non-backdated
                    paper track record -- never real money, never a real
-                   order
+                   order; plus (since 2026-10-17)
+                   VALIDATED_FORECAST_HORIZONS_DAYS / pick_validated_horizon,
+                   matching a real market's own days_to_close to one of
+                   forecast.py's actually-validated horizons so the
+                   forecast-horizon-mismatch caveat no longer fires by
+                   default
 tests/
   test_data.py         date-math unit test + live EIA integration test + cache-hit test
   test_forecast.py     synthetic-data + real-WTI-series end-to-end tests, static and ACI
@@ -84,8 +94,14 @@ tests/
                         retry/backoff, plus one live integration test
                         against the real production API
   test_edge.py          (since 2026-10-16) hand-computed Kelly-sizing
-                        checks, honesty-caveat checks, and paper-bet
-                        append/load/resolve round-trips
+                        checks, honesty-caveat checks, paper-bet
+                        append/load/resolve round-trips, and (since
+                        2026-10-17) pick_validated_horizon rounding checks
+  test_forecast_horizon.py (since 2026-10-17) confirms horizon=1 reduces
+                        exactly to the existing one-step pipeline, real-data
+                        checks at every validated horizon, a real-data
+                        monotonic-MAE check, and that probability.py's
+                        existing backtest works unchanged on a horizon result
 data/
   wti_spot_daily.csv real cached WTI daily spot price series, 1986-01-02 to present
 predictions/
@@ -680,6 +696,84 @@ against Kalshi's production API (not assumed from a series name):
   series. The Horizon issue (a genuine multi-step-ahead forecaster) is
   unaffected either way and remains open.
 
+### Resolving the forecast-horizon mismatch (2026-10-17)
+
+The "Horizon" item above asked for a genuine multi-step-ahead forecaster —
+built this run as `forecast.fit_calibrated_naive_forecaster_horizon` +
+`forecast.prepare_horizon_split`, instead of always reusing the one-day
+residual pool past where it was ever validated.
+
+**What it actually does:** the same `NaiveForecaster` + split-conformal
+pipeline every other result in this README already uses, but windowed so
+the *target* is genuinely `horizon` steps ahead (`series[i+lookback+horizon-1]`,
+via conformal-forecast's own already-tested `make_windows(..., horizon=horizon)`
+— unmodified, just threaded through where `prepare_split_from_series`
+itself doesn't expose it). At `horizon=1` this is proven, not assumed, to
+reduce *exactly* to the existing one-step pipeline (same coverage, same MAE,
+same residual pool — see `tests/test_forecast_horizon.py`'s dedicated
+check). This deliberately does not touch `conformal-forecast` itself —
+only this project's own code composes that library's existing public
+primitives a second way.
+
+**Real, measured result on the full WTI series** (lookback=5, alpha=0.1;
+MAE grows and the interval widens as horizon grows, exactly as it should
+for a forecast held flat further and further out — a real, honest,
+monotonic property, not a coincidence of one run's data):
+
+| Horizon (trading days) | n_test | MAE ($/bbl) | Empirical coverage | Brier (threshold backtest) | Mean calibration error |
+|---|---|---|---|---|---|
+| 1  | 1,906 | $1.43 | 80.7% | 0.0905 | 0.0261 |
+| 2  | 1,906 | $2.06 | 78.6% | 0.1163 | 0.0431 |
+| 3  | 1,906 | $2.52 | 77.1% | 0.1328 | 0.0428 |
+| 5  | 1,906 | $3.15 | 77.3% | 0.1521 | 0.0570 |
+| 10 | 1,906 | $4.25 | 81.5% | 0.1750 | 0.0494 |
+| 15 | 1,906 | $5.12 | 81.4% | 0.1918 | 0.0466 |
+| 21 | 1,906 | $6.18 | 81.7% | 0.2064 | 0.0552 |
+
+Honest takeaway: coverage stays in a fairly narrow 77–82% band across every
+horizon tested (a persistent gap below the 90% nominal target — the same
+known gap this README's "First real result" section already documents at
+`horizon=1`, not a new problem), rather than collapsing toward 0%/100% the
+way the *naive extrapolation* of the one-day pool did in the "Edge vs. a
+real market price" example above. That stability is the actual point: a
+calibration residual pool measured honestly *at* the horizon it's used for
+degrades gracefully (wider, appropriately less certain) instead of staying
+falsely confident the further out it's pushed.
+
+`VALIDATED_FORECAST_HORIZONS_DAYS = (1, 2, 3, 5, 10, 15, 21)` in `edge.py`
+is the set of horizons actually measured above; `edge.pick_validated_horizon(days_to_close)`
+rounds a real market's own `days_to_close` up to the nearest one of these
+(conservative — a slightly-too-wide pool, never an unvalidated one) and
+returns `None` beyond 21 days, so `compute_edge` is never fed a horizon
+this project hasn't actually measured.
+
+**Real, live re-run of the "Edge vs. a real market price" example (2026-10-17,
+~02:51 UTC), now passing the horizon-matched pool instead of always `horizon=1`:**
+
+| Strike | Our P(exceed) | Market P(exceed) | Edge | Volume | days_to_close | Matched horizon | Caveats now |
+|---|---|---|---|---|---|---|---|
+| $99.99 | 82.1% | 39.0% | +0.431 | 886.1 | 2.65 | 3 | benchmark only |
+| $99.49 | 87.3% | 45.0% | +0.423 | 258.7 | 2.65 | 3 | benchmark only |
+| $98.99 | 91.6% | 52.0% | +0.396 | 734.8 | 2.65 | 3 | benchmark only |
+| $98.49 | 94.1% | 59.0% | +0.351 | 1,178.6 | 2.65 | 3 | benchmark only |
+| $97.99 | 96.1% | 66.0% | +0.301 | 315.0 | 2.65 | 3 | benchmark only |
+| $97.49 | 97.1% | 73.0% | +0.241 | 386.0 | 2.65 | 3 | benchmark only |
+
+**Real progress, honestly reported — the forecast-horizon-mismatch caveat
+no longer fires for every row above** (`EdgeEstimate.trustworthy`'s
+remaining `False` is now solely the settlement-benchmark mismatch, not
+both issues at once as in the original example). This is **not** a
+"profitable" result: the EIA spot cache is still 3 real days stale as of
+this writing (last observation 2026-10-14, $101.91/bbl — EIA has not
+published anything newer; see the forward-track-record section's own
+standing note on this), and the whole reason these probabilities look so
+lopsided is almost certainly the same real spot/futures basis gap
+documented in the original example, not genuine model skill — exactly the
+settlement-benchmark caveat that still, correctly, fires. One real caveat
+down, one to go: the next real engineering step is unchanged from the
+"What's next" item below — sourcing a historical ICE WTI futures series to
+measure and correct that basis directly.
+
 ## What's next
 
 1. ~~Try `conformal-forecast`'s existing Adaptive Conformal Inference
@@ -758,10 +852,20 @@ against Kalshi's production API (not assumed from a series name):
    benchmarks" above. Honest result: no such series exists; the two
    Pyth-settled alternatives found (`KXWTI15M`, `KXWTIH`) swap the
    benchmark problem for a different one rather than removing it, and
-   make the horizon mismatch worse, not better. The real remaining path
-   is sourcing a historical ICE WTI futures series to measure/correct the
-   basis against `KXWTI` directly, or building a genuine multi-step-ahead
-   forecaster — neither attempted yet.
+   make the horizon mismatch worse, not better. ~~Build a genuine
+   multi-step-ahead forecaster (removing the horizon mismatch).~~ **Done
+   (2026-10-17)** — see "Resolving the forecast-horizon mismatch" above.
+   `fit_calibrated_naive_forecaster_horizon` is real, measured, and tested
+   at 7 real horizons (1/2/3/5/10/15/21 trading days); `pick_validated_horizon`
+   wires it into `compute_edge` so the horizon caveat clears for any real
+   market closing within 21 days, which it now does in the re-run live
+   example above. **One real caveat down, one remaining:** the
+   settlement-benchmark mismatch is unaffected by this change and still
+   correctly fires on every real market checked so far — the real
+   remaining path is sourcing a historical ICE WTI futures series to
+   measure/correct the spot/futures basis against `KXWTI` directly (not
+   yet attempted). No "profitable, beats-the-edge" claim should be made
+   until that's done too.
 
 ## Running it
 
