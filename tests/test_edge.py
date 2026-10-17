@@ -1,10 +1,12 @@
 import pytest
 
 from commodity_forecast.edge import (
+    VALIDATED_FORECAST_HORIZONS_DAYS,
     EdgeEstimate,
     compute_edge,
     load_paper_bets,
     market_implied_probability,
+    pick_validated_horizon,
     resolve_pending_paper_bets,
     size_paper_bet,
     append_paper_bet,
@@ -240,3 +242,62 @@ def test_resolve_pending_paper_bets_never_retouches_already_resolved(tmp_path):
 
     resolved = resolve_pending_paper_bets(should_not_be_called, path=path)
     assert resolved[0] == bet
+
+
+def test_pick_validated_horizon_rounds_up_to_the_nearest_validated_value():
+    assert pick_validated_horizon(1) == 1
+    assert pick_validated_horizon(2.65) == 3  # a real days_to_close value seen live on 2026-10-17
+    assert pick_validated_horizon(4) == 5
+    assert pick_validated_horizon(21) == 21
+
+
+def test_pick_validated_horizon_returns_none_beyond_every_validated_value():
+    assert pick_validated_horizon(22) is None
+    assert pick_validated_horizon(90) is None
+
+
+def test_pick_validated_horizon_uses_the_real_module_constant_by_default():
+    # Every validated horizon this project actually ships should round-trip
+    # to itself -- if it didn't, the constant and the rounding logic would
+    # have silently drifted apart.
+    for h in VALIDATED_FORECAST_HORIZONS_DAYS:
+        assert pick_validated_horizon(h) == h
+
+
+def test_compute_edge_horizon_caveat_clears_once_days_to_close_is_within_a_validated_horizon():
+    """The real, concrete improvement this run's work makes: a market whose
+    `days_to_close` is covered by `pick_validated_horizon` should no longer
+    carry the forecast-horizon-mismatch caveat (the settlement-benchmark
+    caveat is a separate, still-open issue and correctly still fires with
+    its own default)."""
+    q = _quote(close_time="2026-10-19T18:30:00Z", volume=1000.0, open_interest=500.0)
+    days_to_close = 2.65
+    horizon = pick_validated_horizon(days_to_close)
+    assert horizon == 3
+
+    est = compute_edge(
+        our_probability=0.6,
+        quote=q,
+        forecast_horizon_days=horizon,
+        days_to_close=days_to_close,
+    )
+    assert not any("forecast-horizon mismatch" in c for c in est.caveats)
+    # settlement-benchmark mismatch is untouched by this change and should
+    # still fire with compute_edge's own honest default.
+    assert any("settlement-benchmark mismatch" in c for c in est.caveats)
+    assert est.trustworthy is False
+
+
+def test_compute_edge_horizon_caveat_still_fires_beyond_every_validated_horizon():
+    q = _quote(close_time="2026-11-20T18:30:00Z", volume=1000.0, open_interest=500.0)
+    days_to_close = 34.0
+    horizon = pick_validated_horizon(days_to_close)
+    assert horizon is None
+
+    est = compute_edge(
+        our_probability=0.6,
+        quote=q,
+        forecast_horizon_days=1,  # the only honest value left to pass when nothing validated covers it
+        days_to_close=days_to_close,
+    )
+    assert any("forecast-horizon mismatch" in c for c in est.caveats)
