@@ -104,6 +104,47 @@ def test_mae_increases_monotonically_with_horizon_on_real_data():
     assert maes == sorted(maes)
 
 
+def test_prepare_horizon_split_has_no_leakage():
+    """Directly verifies, against the raw series indices (not inferred from
+    a downstream metric), that every train window's real target falls
+    strictly before the calibration region, every cal window's target
+    falls strictly within it, and every test window's target falls at or
+    after the test region's own start -- for every horizon this project
+    validates. This is exactly the check that would catch an off-by-one
+    version of `prepare_horizon_split`'s split (e.g. forgetting the
+    `- horizon + 1` term in `n_train_windows`) before it ever reached a
+    coverage number that merely "looked" plausible -- the same off-by-one
+    leakage bug class conformal-forecast's own README has twice found in
+    bounded-pool code (see that repo's process notes).
+    """
+    from forecasting.data import chronological_split
+
+    series = np.arange(2000, dtype=np.float64) + np.sin(np.arange(2000) / 7.0) * 3.0
+    lookback = 5
+
+    for horizon in (1, 2, 3, 5, 10, 15, 21):
+        split = chronological_split(series, train_frac=0.6, cal_frac=0.2)
+        n_train_raw, n_cal_raw = len(split.train), len(split.calibration)
+
+        result = fit_calibrated_naive_forecaster_horizon(series, horizon=horizon, lookback=lookback, alpha=0.1)
+        n_train_windows = result.diagnostics["n_train_windows"]
+        n_cal_windows = result.diagnostics["n_cal_windows"]
+
+        # Window i's real target index in the raw series is i + lookback + horizon - 1.
+        last_train_target = (n_train_windows - 1) + lookback + horizon - 1
+        first_cal_target = n_train_windows + lookback + horizon - 1
+        last_cal_target = (n_train_windows + n_cal_windows - 1) + lookback + horizon - 1
+        first_test_target = n_train_windows + n_cal_windows + lookback + horizon - 1
+
+        assert last_train_target < n_train_raw, horizon
+        assert n_train_raw <= first_cal_target, horizon
+        assert last_cal_target < n_train_raw + n_cal_raw, horizon
+        assert first_test_target >= n_train_raw + n_cal_raw, horizon
+        # n_cal_windows itself should never depend on horizon (only
+        # n_train_windows does) -- see prepare_horizon_split's own docstring.
+        assert n_cal_windows == n_cal_raw
+
+
 def test_backtest_threshold_calibration_works_unchanged_on_a_horizon_result():
     """`probability.backtest_threshold_calibration` was built against
     `fit_calibrated_naive_forecaster`'s one-step `CalibratedForecastResult`
