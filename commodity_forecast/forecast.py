@@ -33,6 +33,7 @@ from forecasting.adaptive import (
     evaluate_adaptive_coverage,
 )
 from forecasting.conformal import SplitConformalForecaster, evaluate_coverage
+from forecasting.data import Normalizer, chronological_split, make_windows
 from forecasting.experiment import prepare_split_from_series
 from forecasting.models import DeltaWrapper, LSTMForecaster, NaiveForecaster
 
@@ -123,6 +124,111 @@ def fit_calibrated_naive_forecaster(
         "n_train_windows": int(len(X_train)),
         "n_cal_windows": int(len(X_cal)),
         "lookback": lookback,
+    }
+
+    return CalibratedForecastResult(
+        conformal_forecaster=conformal,
+        normalizer_mean=normalizer.mean_,
+        cal_residuals_normalized=cal_residuals_normalized,
+        normalizer_std=normalizer.std_,
+        diagnostics=diagnostics,
+    )
+
+
+def fit_calibrated_naive_forecaster_multistep(
+    series_values: np.ndarray,
+    horizon_days: int,
+    lookback: int = 5,
+    alpha: float = 0.1,
+) -> CalibratedForecastResult:
+    """Same naive-forecaster + split-conformal pipeline as
+    `fit_calibrated_naive_forecaster`, but validated `horizon_days` real
+    trading days ahead instead of just one -- this project's own "What's
+    next" Horizon item, named plainly in the README's "Edge vs. a real
+    market price" section: *"extend forecast.py with a genuinely
+    multi-step-ahead forecaster... and backtest its own coverage/
+    calibration the same honest way every existing model here already
+    is -- not assumed, measured."*
+
+    Deliberately does NOT call `prepare_split_from_series` (which hardcodes
+    `horizon=1` in its own call to `make_windows`) -- instead calls
+    conformal-forecast's own public `chronological_split`, `Normalizer`,
+    and `make_windows` directly, the exact same three building blocks
+    `prepare_split_from_series` itself is built from, just with
+    `make_windows(..., horizon=horizon_days)` instead of a hardcoded 1.
+    `make_windows` already supports an arbitrary `horizon` -- this is using
+    an existing, already-tested public capability of the dependency in a
+    new way, not reimplementing or forking any of its logic.
+
+    `make_windows(norm_series, lookback, horizon=horizon_days)` returns
+    `y_full` of shape `(num_windows, horizon_days)`: `y_full[i, k]` is the
+    value `k+1` trading days after window `i`'s own lookback slice ends.
+    This function keeps only the *last* column (`y_full[:, -1:]`) -- the
+    value exactly `horizon_days` days out -- since answering "what's the
+    calibrated probability N days from now" is the real Kalshi question
+    (a market closing in N days asks about the price N days out, not about
+    every intermediate day along the way).
+
+    Train/cal/test window boundaries use the same "window i belongs to
+    whichever raw region its own *target* index falls in" rule
+    `prepare_split_from_series` uses for horizon=1, generalized correctly
+    for horizon_days > 1: window i's target sits at raw index
+    `i + lookback + horizon_days - 1`, not `i + lookback` -- so
+    `n_train_windows` must subtract `horizon_days - 1` as well, or train
+    windows would silently leak `horizon_days - 1` points of calibration-
+    region information into training. This is explicitly tested by
+    `tests/test_forecast_multistep.py::test_multistep_split_has_no_leakage`
+    for every horizon this module is used at, not just asserted here --
+    the same class of off-by-one leakage bug conformal-forecast's own
+    README has twice found in bounded-pool code, caught here before
+    shipping instead of after.
+    """
+    if horizon_days < 1:
+        raise ValueError("horizon_days must be a positive integer")
+
+    split = chronological_split(series_values, train_frac=0.6, cal_frac=0.2)
+    normalizer = Normalizer().fit(split.train)
+    norm_series = normalizer.transform(split.full())
+
+    X, y_full = make_windows(norm_series, lookback=lookback, horizon=horizon_days)
+    y = y_full[:, -1:]  # the value exactly horizon_days days out
+
+    n_train_raw, n_cal_raw = len(split.train), len(split.calibration)
+    n_train_windows = max(0, n_train_raw - lookback - horizon_days + 1)
+    n_cal_windows = n_cal_raw
+
+    X_train, y_train = X[:n_train_windows], y[:n_train_windows]
+    X_cal, y_cal = X[n_train_windows : n_train_windows + n_cal_windows], y[
+        n_train_windows : n_train_windows + n_cal_windows
+    ]
+    X_test, y_test = X[n_train_windows + n_cal_windows :], y[n_train_windows + n_cal_windows :]
+
+    if len(X_train) < 5 or len(X_cal) < 5 or len(X_test) < 5:
+        raise ValueError(
+            f"Not enough windows for horizon_days={horizon_days}, lookback={lookback}: "
+            f"train={len(X_train)} cal={len(X_cal)} test={len(X_test)}"
+        )
+
+    model = NaiveForecaster()
+    conformal = SplitConformalForecaster(model=model, alpha=alpha)
+    conformal.fit(X_train, y_train, X_cal, y_cal)
+
+    prediction = conformal.predict(X_test)
+    coverage = evaluate_coverage(prediction, y_test)
+
+    point_denorm = normalizer.inverse_transform(prediction.point)
+    y_test_denorm = normalizer.inverse_transform(y_test)
+    mae_usd = float(np.mean(np.abs(point_denorm - y_test_denorm)))
+
+    cal_residuals_normalized = (y_cal - conformal.model.predict(X_cal)).reshape(-1)
+
+    diagnostics = {
+        **coverage,
+        "mae_usd_per_bbl": mae_usd,
+        "n_train_windows": int(len(X_train)),
+        "n_cal_windows": int(len(X_cal)),
+        "lookback": lookback,
+        "horizon_days": horizon_days,
     }
 
     return CalibratedForecastResult(
