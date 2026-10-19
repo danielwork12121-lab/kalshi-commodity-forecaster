@@ -102,6 +102,13 @@ commodity_forecast/
                    honestly check whether any slice of the ladder looks
                    different from the ladder-wide average; see "An
                    edge-subset survey" below
+  edge_persistence.py (since 2026-10-19, continued) append_survey_snapshot
+                   / load_survey_history / summarize_persistence -- records
+                   each real edge_survey.py run to data/edge_subset_history.jsonl
+                   and reports, once enough real snapshots exist, whether a
+                   subset's edge sign has actually held up over time rather
+                   than being single-snapshot noise; see "Tracking
+                   persistence across real snapshots" below
 tests/
   test_data.py         date-math unit test + live EIA integration test + cache-hit test
   test_forecast.py     synthetic-data + real-WTI-series end-to-end tests, static and ACI
@@ -132,8 +139,16 @@ tests/
                         against a real captured, currently-open KXWTI
                         ladder and a real settlement-history fixture --
                         confirms nothing is silently skipped/scored wrong
+  test_edge_persistence.py (since 2026-10-19, continued) append/load
+                        roundtrip checks, real-JSONL-file checks, and the
+                        "not enough data yet" / sign-consistent /
+                        sign-flipped persistence-verdict logic
 data/
   wti_spot_daily.csv real cached WTI daily spot price series, 1986-01-02 to present
+  edge_subset_history.jsonl (since 2026-10-19, continued) the real,
+                     append-only, forward-only history of edge-subset
+                     survey snapshots -- one real JSON line per real
+                     survey run, never backdated or synthetic
 predictions/
   README.md         explains the forward track record's format and resolution rule
   track_record.jsonl the real, dated predictions themselves (first batch made and
@@ -1027,6 +1042,55 @@ look first (strikes close to the current price), not a uniform small
 error everywhere. No "profitable" or "beats-the-edge" claim is made here,
 consistent with every other result in this README.
 
+### Tracking persistence across real snapshots (2026-10-19, continued)
+
+The edge-subset survey above is explicit that one snapshot can't support a
+*persistent*-edge claim — a subset looking different on one day's ladder
+could easily be noise. This run builds the machinery to actually check
+that over time, rather than leaving it as a hypothetical "What's next"
+item: `commodity_forecast/edge_persistence.py`
+(`append_survey_snapshot` / `load_survey_history` / `summarize_persistence`
+/ `format_persistence_summary`), 10 new tests (119→129).
+
+`append_survey_snapshot` records one real, dated snapshot of a
+`summarize_edge_subsets` result to `data/edge_subset_history.jsonl` —
+append-only, one real JSON line per real survey run, never backdated or
+synthetic. `summarize_persistence` reads back every snapshot recorded so
+far and, per subset label, reports whether the sign of `mean_edge` has
+been consistent across every real snapshot that had data for it — but
+only once at least `MIN_SNAPSHOTS_FOR_A_PERSISTENCE_VERDICT` (3) real data
+points exist; with fewer, it honestly reports "not enough data yet" rather
+than calling a 1-for-1 or 2-for-2 sign match "persistent," which would be
+indistinguishable from chance.
+
+**This run recorded the first real entry in that history file** (a fresh
+live survey, not a reuse of the snapshot earlier in this same document):
+
+```
+subset                    n   mean edge   mean |edge|
+all                     103     -0.0455        0.1435
+near-the-money           12     -0.3240        0.3240
+far-out-of-the-money     91     -0.0088        0.1197
+short-horizon             0         n/a           n/a
+long-horizon            103     -0.0455        0.1435
+liquid                  103     -0.0455        0.1435
+illiquid                  0         n/a           n/a
+```
+
+Consistent with the snapshot earlier in this document, taken roughly two
+hours earlier the same day: `near-the-money` is again the most negative
+subset (-0.324 here vs. -0.2865 then) — in line with the same EIA-
+staleness explanation (the spot anchor is still stuck at 2026-10-14, so
+nothing about the explanation changed between the two snapshots).
+`far-out-of-the-money` moved from a small positive (+0.0182) to a small
+negative (-0.0088) — both close to zero, the kind of noise-level movement
+expected if there's no real subset-level signal there, not a reversal
+worth reading into. **With only one real entry recorded in the new
+history file, `summarize_persistence` correctly reports "not enough real
+snapshots yet" for every subset — this is not yet a persistence claim,
+honestly stated as such.** A genuine verdict needs at least two more real
+recorded snapshots from future runs.
+
 ## What's next
 
 1. ~~Try `conformal-forecast`'s existing Adaptive Conformal Inference
@@ -1145,12 +1209,19 @@ consistent with every other result in this README.
    independent of which horizon it's matched to — the edge-subset survey
    above is itself new evidence that this specific gap matters most
    right where it would be most tempting to look for a real edge.
-8. **(New, 2026-10-19)** Repeat the edge-subset survey on successive runs
-   and check whether any one subset's edge sign/magnitude actually holds
-   up over multiple real snapshots, which is the only way a *persistent*
-   (not just single-snapshot) edge claim could honestly be supported —
-   not yet attempted; today's survey is deliberately reported as one
-   snapshot only.
+8. ~~Repeat the edge-subset survey on successive runs and check whether any
+   one subset's edge sign/magnitude actually holds up over multiple real
+   snapshots, which is the only way a *persistent* (not just
+   single-snapshot) edge claim could honestly be supported.~~ **Machinery
+   built and the first real snapshot recorded (2026-10-19, continued)** —
+   see "Tracking persistence across real snapshots" above:
+   `edge_persistence.py`, `data/edge_subset_history.jsonl`. Honestly
+   still in progress, not done: a real persistence verdict needs at least
+   `MIN_SNAPSHOTS_FOR_A_PERSISTENCE_VERDICT` (3) real recorded snapshots,
+   and only one exists so far. **A future run should call
+   `survey_live_edges` + `summarize_edge_subsets` +
+   `append_survey_snapshot` again (not re-use this run's numbers) and
+   check `summarize_persistence`'s output once 2-3 real entries exist.**
 
 ## Running it
 
