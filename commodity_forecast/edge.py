@@ -127,6 +127,40 @@ def pick_validated_horizon(days_to_close: float, horizons: tuple[int, ...] = VAL
     candidates = [h for h in horizons if h >= days_to_close]
     return min(candidates) if candidates else None
 
+
+def days_to_close_from_last_observation(close_time: str, last_observed_date) -> float:
+    """Honest days-to-close for `pick_validated_horizon` when the
+    forecast's own spot series may be stale: calendar days between the
+    forecast's actual data origin (the last observed spot date) and a
+    market's real `close_time` -- **not** between wall-clock "now" and
+    `close_time`.
+
+    Found and fixed 2026-10-19: this project's cached EIA spot series is
+    frequently several real days stale (EIA hasn't always published a new
+    observation as of when a run checks -- a real, recurring, already-
+    documented condition, not hypothetical). A naive `close_time - now`
+    computation silently assumes the forecast's data is current. When it
+    isn't, that understates how far out the forecast is really being
+    asked to extrapolate from its own last known data point, so
+    `pick_validated_horizon` can select an inappropriately *narrow*
+    (overconfident) validated horizon -- reintroducing the exact
+    forecast-horizon-mismatch problem this machinery exists to catch,
+    just through a different door (the staleness gap, not the market's
+    own distance from today). Always prefer this over a bare
+    `close_time - now` for this project's series, which can always be
+    stale by the time a real run or a real bet is made.
+
+    `last_observed_date` accepts either an ISO date string or any
+    datetime-like object exposing `.date()` (e.g. a pandas `Timestamp`,
+    what `commodity_forecast.data.fetch_wti_daily`'s index already is).
+    """
+    if isinstance(last_observed_date, str):
+        last_obs_dt = _dt.datetime.fromisoformat(last_observed_date).replace(tzinfo=_dt.timezone.utc)
+    else:
+        last_obs_dt = _dt.datetime.combine(last_observed_date.date(), _dt.time(0, 0), tzinfo=_dt.timezone.utc)
+    close_dt = _dt.datetime.fromisoformat(close_time.replace("Z", "+00:00"))
+    return (close_dt - last_obs_dt).total_seconds() / 86400.0
+
 # A real, stated, conservative fractional-Kelly cap -- never full Kelly (full
 # Kelly is famously overaggressive under any real model-probability error,
 # and this project's own model is already honestly known to be imperfect --
@@ -175,6 +209,14 @@ class EdgeEstimate:
     market_open_interest: float
     edge: float  # our_probability - market_probability; positive = we think YES is more likely than the market does
     caveats: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+    # Informational context that does NOT affect `trustworthy` -- e.g. a real,
+    # measured basis-correction note from `benchmark.py` explaining exactly
+    # what adjustment was applied (or found not trustworthy enough to apply)
+    # and how well-supported it is. Kept separate from `caveats` on purpose:
+    # a caveat is a reason not to trust this estimate; a note is transparency
+    # about a correction, so a reader sees the real numbers either way
+    # rather than a bare True/False.
 
     @property
     def trustworthy(self) -> bool:
@@ -195,6 +237,7 @@ def compute_edge(
     min_volume_for_trust: float = 1.0,
     forecast_horizon_days: int | None = None,
     days_to_close: int | None = None,
+    basis_note: str | None = None,
 ) -> EdgeEstimate:
     """Compute one real `EdgeEstimate` for one real market quote.
 
@@ -206,7 +249,19 @@ def compute_edge(
     against the same real number the forecast predicts -- e.g. after the
     "What's next" work of sourcing a real, free, historical EIA-vs-ICE-WTI
     basis series, or finding a different Kalshi series that settles against
-    EIA's own published spot index directly.
+    EIA's own published spot index directly, or (as of 2026-10-19) after
+    applying a real, measured recent-window basis correction from
+    `benchmark.py` (see `describe_basis_correction`) whose own quality
+    (stdev, sample size) clears a real trust bar -- pass the resulting
+    `our_probability` computed at the basis-adjusted strike, and pass the
+    note `describe_basis_correction` returns as `basis_note` below so the
+    real correction is visible on the resulting estimate, not hidden.
+
+    `basis_note`: optional, informational-only text appended to
+    `EdgeEstimate.notes` (never `caveats` -- it does not by itself affect
+    `trustworthy`). Intended for `benchmark.describe_basis_correction`'s
+    own returned note, whether or not that correction was trusted enough
+    to also flip `settlement_benchmark_matches_forecast` above.
 
     `forecast_horizon_days`/`days_to_close`: pass both (e.g.
     `forecast_horizon_days=1` for `fit_calibrated_naive_forecaster`, and
@@ -260,6 +315,7 @@ def compute_edge(
         market_open_interest=quote.open_interest,
         edge=float(our_probability - market_prob),
         caveats=caveats,
+        notes=[basis_note] if basis_note else [],
     )
 
 
