@@ -1091,6 +1091,34 @@ snapshots yet" for every subset — this is not yet a persistence claim,
 honestly stated as such.** A genuine verdict needs at least two more real
 recorded snapshots from future runs.
 
+**A second real entry was recorded roughly two hours later the same day**
+(a fresh, live `survey_live_edges` + `summarize_edge_subsets` run, 105
+real open markets, 0 skipped, at `2026-10-19T22:48:27Z`):
+
+```
+subset                    n   mean edge   mean |edge|
+all                     103     -0.0414        0.1395
+near-the-money           12     -0.3181        0.3181
+far-out-of-the-money     91     -0.0049        0.1160
+short-horizon             0         n/a           n/a
+long-horizon            103     -0.0414        0.1395
+liquid                  103     -0.0414        0.1395
+illiquid                  0         n/a           n/a
+```
+
+Every subset's sign matches the first snapshot exactly (`near-the-money`
+and `all`/`long-horizon`/`liquid` all negative both times; `far-OTM` now
+negative both times too, both close to zero), and the magnitudes moved by
+only a few thousandths — consistent with real intra-day market-price
+movement on the live `KXWTI` ladder, not a different regime. **With 2 of
+the required 3 real snapshots now recorded, `summarize_persistence`
+still correctly reports "not enough real snapshots yet (2/3 needed)" for
+every subset** — two agreeing signs is suggestive but not yet the
+pre-registered threshold this project set for itself, and this project
+does not lower that bar just because the next snapshot could clear it. A
+third real recorded snapshot from a future run will produce this
+project's first real sign-consistency verdict.
+
 ## What's next
 
 1. ~~Try `conformal-forecast`'s existing Adaptive Conformal Inference
