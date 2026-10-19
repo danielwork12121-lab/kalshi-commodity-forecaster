@@ -4,6 +4,7 @@ from commodity_forecast.edge import (
     VALIDATED_FORECAST_HORIZONS_DAYS,
     EdgeEstimate,
     compute_edge,
+    days_to_close_from_last_observation,
     load_paper_bets,
     market_implied_probability,
     pick_validated_horizon,
@@ -301,3 +302,69 @@ def test_compute_edge_horizon_caveat_still_fires_beyond_every_validated_horizon(
         days_to_close=days_to_close,
     )
     assert any("forecast-horizon mismatch" in c for c in est.caveats)
+
+
+def test_compute_edge_notes_default_empty_and_do_not_affect_trustworthy():
+    q = _quote(volume=1000.0, open_interest=500.0)
+    est = compute_edge(our_probability=0.5, quote=q, settlement_benchmark_matches_forecast=True)
+    assert est.notes == []
+    assert est.trustworthy is True
+
+
+def test_compute_edge_basis_note_is_recorded_but_never_a_caveat():
+    q = _quote(volume=1000.0, open_interest=500.0)
+    note = "settlement-benchmark basis corrected using a real, measured recent-window estimate: mean -6.70 USD/bbl, stdev 0.15, n=10 real paired observations -- tight and well-supported enough to trust"
+    est = compute_edge(
+        our_probability=0.5,
+        quote=q,
+        settlement_benchmark_matches_forecast=True,
+        basis_note=note,
+    )
+    assert est.notes == [note]
+    assert not any("basis" in c for c in est.caveats)  # a note is never a caveat
+    assert est.trustworthy is True
+
+
+def test_compute_edge_basis_note_recorded_even_when_correction_not_trusted():
+    # Caller decided NOT to flip settlement_benchmark_matches_forecast
+    # (correction wasn't trustworthy), but still wants the real measured
+    # numbers on the record for transparency.
+    q = _quote(volume=1000.0, open_interest=500.0)
+    note = "settlement-benchmark basis corrected using a real, measured recent-window estimate: mean -4.00 USD/bbl, stdev 2.50, n=10 real paired observations -- NOT trusted (too few points or too much spread)"
+    est = compute_edge(our_probability=0.5, quote=q, basis_note=note)
+    assert est.notes == [note]
+    assert any("settlement-benchmark mismatch" in c for c in est.caveats)
+    assert est.trustworthy is False
+
+
+def test_days_to_close_from_last_observation_uses_data_origin_not_now():
+    import datetime as dt
+
+    # Real case this project hit 2026-10-19: last EIA observation 2026-10-14
+    # (a stale, 5-real-day-old cache), a market closing 2026-10-20T18:30:00Z.
+    days = days_to_close_from_last_observation("2026-10-20T18:30:00Z", "2026-10-14")
+    assert days == pytest.approx(6.770833333333333, abs=1e-6)
+
+
+def test_days_to_close_from_last_observation_accepts_datetime_like_object():
+    import datetime as dt
+
+    class _FakeTimestamp:
+        def date(self):
+            return dt.date(2026, 10, 14)
+
+    days = days_to_close_from_last_observation("2026-10-20T18:30:00Z", _FakeTimestamp())
+    assert days == pytest.approx(6.770833333333333, abs=1e-6)
+
+
+def test_staleness_aware_horizon_is_wider_than_a_naive_now_based_one():
+    # The real bug this fix addresses: a naive `close_time - now` (as if
+    # the data were fresh) picks a much narrower, overconfident horizon
+    # than the honest data-origin-based one.
+    honest_days = days_to_close_from_last_observation("2026-10-20T18:30:00Z", "2026-10-14")
+    honest_horizon = pick_validated_horizon(honest_days)
+    naive_days = 1.05  # close_time - "now" (2026-10-19), ignoring staleness
+    naive_horizon = pick_validated_horizon(naive_days)
+    assert honest_horizon == 10
+    assert naive_horizon == 2
+    assert honest_horizon > naive_horizon
