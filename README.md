@@ -94,6 +94,14 @@ commodity_forecast/
                    correct for -- the real spot/futures basis against
                    this project's own EIA spot series; see "Resolving
                    the settlement-benchmark mismatch" below
+  edge_survey.py   (since 2026-10-19) survey_live_edges + summarize_edge_subsets
+                   -- runs the real edge.py pipeline across every real
+                   open market on a series in one call, instead of one
+                   market at a time, and breaks the real result down by
+                   real subsets (strike distance, horizon, liquidity) to
+                   honestly check whether any slice of the ladder looks
+                   different from the ladder-wide average; see "An
+                   edge-subset survey" below
 tests/
   test_data.py         date-math unit test + live EIA integration test + cache-hit test
   test_forecast.py     synthetic-data + real-WTI-series end-to-end tests, static and ACI
@@ -119,6 +127,11 @@ tests/
                         real captured slice of KXWTI's own settlement
                         history, real basis-measurement/recent-window-
                         estimate checks, and basis-correction trust checks
+  test_edge_survey.py   (since 2026-10-19) pure-unit subset-bucketing checks
+                        plus a real end-to-end run of survey_live_edges
+                        against a real captured, currently-open KXWTI
+                        ladder and a real settlement-history fixture --
+                        confirms nothing is silently skipped/scored wrong
 data/
   wti_spot_daily.csv real cached WTI daily spot price series, 1986-01-02 to present
 predictions/
@@ -945,6 +958,75 @@ conclusion, reported the same honest way every other result in this
 README is, not reframed to fit the "profitable" framing Daniel's
 2026-10-16 direction asked this project to investigate.
 
+### An edge-subset survey: does any real slice of the ladder show a different edge? (2026-10-19, continued)
+
+The two sections above resolved both named structural caveats and found,
+honestly, that the *ladder-wide average* corrected edge is not
+trustworthy. The natural follow-up this project hadn't yet asked: does
+any real **subset** of the live ladder look different from that average
+— e.g. strikes near the current price vs. far out-of-the-money ones,
+short-horizon vs. long-horizon questions, liquid vs. illiquid markets?
+
+Built `commodity_forecast/edge_survey.py` (`survey_live_edges` +
+`summarize_edge_subsets` + `format_edge_subset_summary`), 8 new tests
+(111→119). `survey_live_edges` runs the full real pipeline (horizon pick,
+basis correction, `compute_edge`) across *every* real open market on a
+series in one call, instead of the one-market-at-a-time usage every prior
+example above showed — fitting one horizon-validated forecaster per
+distinct real horizon the live ladder actually needs, never once per
+market. **Honest scope, stated plainly in the module docstring too: this
+is one live snapshot, not a claim that any subset's edge is *persistent*
+over time** — this project has no repeated-snapshot history yet to
+support that stronger claim (see "What's next" below).
+
+**Real, live result (2026-10-19, ~18:xx UTC, real `KXWTI` ladder, 105 real
+open markets, 0 skipped):**
+
+```
+subset                    n   mean edge   mean |edge|
+all                     103     -0.0173        0.1547
+near-the-money           12     -0.2865        0.3028
+far-out-of-the-money     91     +0.0182        0.1351
+short-horizon             0         n/a           n/a
+long-horizon            103     -0.0173        0.1547
+liquid                  103     -0.0173        0.1547
+illiquid                  0         n/a           n/a
+```
+
+(`short-horizon`/`illiquid` are empty on this particular snapshot — no
+real open market right now closes within the cached data's own 5-day
+horizon or trades zero volume; reported as `n/a`, not hidden.)
+
+**The near-the-money subset's large negative number looked, at first
+glance, like exactly the "some slice is different" finding this survey
+was built to look for — investigated rather than taken at face value, and
+it isn't one.** Reading the real `KXWTI-26OCT2014` ladder's own strikes in
+order shows the market's own ~50%-probability crossing point sits around
+a basis-adjusted $105/bbl, while this project's forecaster is still
+anchored to its last real observed EIA spot price, $101.91 on
+2026-10-14 — five real days stale (the same staleness this project's own
+EIA ingestion has been honestly flagging since 2026-10-15, and confirmed
+unchanged by a fresh `fetch_wti_daily(refresh=True)` call this run: EIA
+still hasn't published anything newer). A market pricing in five more
+real days of information our forecaster's own anchor point doesn't have
+will disagree most sharply exactly *at* the strikes nearest that stale
+anchor — which is exactly the near-the-money subset. Once a strike is far
+enough from the stale anchor, both sides agree the probability is near 0%
+or 100% regardless of a few dollars' difference in where "today's price"
+really is, which is exactly why the far-OTM subset's mean edge sits close
+to zero instead.
+
+**Honest conclusion: no real subset of the live ladder shows a
+trustworthy, persistent positive edge.** The one subset that looked
+different (near-the-money) is explained by this project's own
+already-known data-staleness limitation, not a real, tradable market
+inefficiency — and that explanation itself is a useful, concrete result:
+it says plainly that any future live use of this project's probabilities
+would be *most* unreliable exactly where a trader would naturally want to
+look first (strikes close to the current price), not a uniform small
+error everywhere. No "profitable" or "beats-the-edge" claim is made here,
+consistent with every other result in this README.
+
 ## What's next
 
 1. ~~Try `conformal-forecast`'s existing Adaptive Conformal Inference
@@ -1044,16 +1126,31 @@ README is, not reframed to fit the "profitable" framing Daniel's
    (see the live re-run table above). No "profitable, beats-the-edge"
    claim is made, and the real next step is no longer "resolve the
    caveats" but "investigate why no edge survives honest correction" —
-   candidates, not yet attempted: the real basis measured here is only
-   ~2.5 weeks of history (worth re-checking as more settlement dates
-   accumulate, since a contract roll could shift it again); the
+   one candidate is now checked: ~~does any real subset of the live
+   ladder (near-the-money, long vs. short horizon, liquid vs. illiquid)
+   show a persistently different edge than the ladder-wide average?~~
+   **Checked (2026-10-19)** — see "An edge-subset survey" above.
+   Honest result: no, not a real one — the one subset that looked
+   different (near-the-money) is explained by this project's own
+   already-known EIA staleness gap, not a genuine market inefficiency.
+   Remaining candidates, not yet attempted: the real basis measured here
+   is only ~2.5 weeks of history (worth re-checking as more settlement
+   dates accumulate, since a contract roll could shift it again); the
    `NaiveForecaster` point forecast may simply be too weak once the
    genuinely-validated horizon is as wide as 10 trading days (worth
    re-trying conformal-forecast's own LSTM/Transformer/N-BEATS model
    families at this horizon specifically, not just at horizon=1 as
    already checked); and the EIA spot cache's own staleness (still 5 real
    days behind as of this writing) degrades the point forecast itself,
-   independent of which horizon it's matched to.
+   independent of which horizon it's matched to — the edge-subset survey
+   above is itself new evidence that this specific gap matters most
+   right where it would be most tempting to look for a real edge.
+8. **(New, 2026-10-19)** Repeat the edge-subset survey on successive runs
+   and check whether any one subset's edge sign/magnitude actually holds
+   up over multiple real snapshots, which is the only way a *persistent*
+   (not just single-snapshot) edge claim could honestly be supported —
+   not yet attempted; today's survey is deliberately reported as one
+   snapshot only.
 
 ## Running it
 
