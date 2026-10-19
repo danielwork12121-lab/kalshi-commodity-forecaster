@@ -80,7 +80,20 @@ commodity_forecast/
                    matching a real market's own days_to_close to one of
                    forecast.py's actually-validated horizons so the
                    forecast-horizon-mismatch caveat no longer fires by
-                   default
+                   default; plus (since 2026-10-19) a `notes` field on
+                   `EdgeEstimate` (informational, never a caveat) and
+                   `days_to_close_from_last_observation`, fixing a real
+                   staleness bug in horizon-matching -- see "Fixing a
+                   staleness bug in horizon-matching" below
+  benchmark.py     (since 2026-10-19) recovers a real, measured estimate
+                   of the ICE WTI futures settlement price Kalshi itself
+                   never publishes directly, from the real resolved
+                   "greater than $X" ladders in KXWTI's own settlement
+                   history (no external/paid futures-data vendor needed),
+                   and uses it to measure -- and, when trustworthy,
+                   correct for -- the real spot/futures basis against
+                   this project's own EIA spot series; see "Resolving
+                   the settlement-benchmark mismatch" below
 tests/
   test_data.py         date-math unit test + live EIA integration test + cache-hit test
   test_forecast.py     synthetic-data + real-WTI-series end-to-end tests, static and ACI
@@ -102,6 +115,10 @@ tests/
                         checks at every validated horizon, a real-data
                         monotonic-MAE check, and that probability.py's
                         existing backtest works unchanged on a horizon result
+  test_benchmark.py     (since 2026-10-19) bracket-recovery checks against a
+                        real captured slice of KXWTI's own settlement
+                        history, real basis-measurement/recent-window-
+                        estimate checks, and basis-correction trust checks
 data/
   wti_spot_daily.csv real cached WTI daily spot price series, 1986-01-02 to present
 predictions/
@@ -795,6 +812,139 @@ explicitly-caveated historical-average-basis estimate computed from
 RCLC1's own stale overlap with the spot series (not a live correction,
 and not yet attempted).
 
+### Resolving the settlement-benchmark mismatch (2026-10-19)
+
+The "Benchmark" item above asked for a real, free historical series for
+ICE WTI futures settlement prices, or a measured real spot/futures basis.
+RCLC1 (NYMEX, discontinued) was a dead end, and no paid vendor has been
+used (that remains Daniel's own cost/access call, not taken on
+unilaterally). **A different, real, free path was found instead: Kalshi's
+own public API already publishes everything needed, just not as a single
+number.**
+
+`KXWTI` never reports the real ICE futures settlement price directly, but
+every settled `KXWTI` market *is* a real "did it settle above $X?"
+question, and Kalshi lists a whole real ladder of these (many strikes,
+$0.50 apart) for every settlement date. Once every market in a ladder has
+resolved, the real settlement value is bracketed exactly between the
+highest strike that resolved "yes" and the lowest that resolved "no" — a
+real, measured interval, never an external vendor or an assumption.
+`commodity_forecast/benchmark.py`'s `bracket_settlements` recovers this
+from `kalshi_client.fetch_markets(..., status="all")`'s own already-tested
+real output.
+
+**Pulled the full real `KXWTI` settlement history live (2026-10-19, 1,605
+real market objects, 45 real bracketable settlement dates spanning
+2026-08-12 through 2026-10-16 — one date, 2026-09-02, had a real ladder
+that resolved entirely one-sided and was correctly skipped, nothing to
+bracket) and paired each real bracket with this project's own cached EIA
+spot observation for the same date (43 of 45 dates matched; the other 2
+are more recent than the EIA cache's own last refresh).**
+
+**Real, honest finding #1 — the basis is not a stable constant:**
+
+| Period | Real measured basis (futures mid − EIA spot) |
+|---|---|
+| 2026-08-12 to 2026-08-31 | roughly −$1.0 to −$3.0 |
+| 2026-09-01 to 2026-09-16 | roughly −$0.97 to −$1.45 |
+| 2026-09-17 to 2026-09-22 | a real, sharp widening: −$4.7 to −$6.0 |
+| 2026-09-23 to 2026-10-16 (most recent 2.5 weeks) | tight and stable: −$6.6 to −$7.0 |
+
+This is consistent with `KXWTI` settling against ICE's *front-month*
+contract, which rolls to a new underlying contract roughly monthly — a
+single all-history average basis would blend two genuinely different
+regimes and actively mislead, not safely correct. One real date
+(2026-09-25) also shows a one-day ~$10 EIA spot value that fully reverts
+the next observation — almost certainly a data artifact in the upstream
+EIA series, reported here rather than silently dropped or smoothed over
+(`measure_basis` does not filter it; see the module docstring).
+
+**Real, honest finding #2 — the basis *is* tight and stable within a short
+recent window, which is what a live correction actually needs:**
+`recent_basis_estimate` over the most recent 10 real paired observations
+(2026-10-02 through 2026-10-16) measured **mean −$6.86, stdev $0.16** —
+tight enough that `describe_basis_correction`'s conservative trust bar
+(stdev ≤ $1.00, n ≥ 5) clears easily. `basis_adjusted_strike` converts a
+market's real futures-terms strike into the spot-terms strike this
+project's forecaster can actually answer (`futures = spot + basis`, so
+`futures > K` ⟺ `spot > K − basis`), and `EdgeEstimate.notes` now carries
+the real correction's own numbers on every estimate it's applied to —
+transparency about what was corrected, not just a flipped boolean.
+
+**Real, live result of applying this (2026-10-19, see also the staleness
+fix below, which this example already incorporates): the settlement-
+benchmark caveat genuinely clears, and *no profitable edge survives it*.**
+Once the basis correction is applied on top of an honestly-matched
+forecast horizon, the previously "spectacular" apparent edge mostly
+reverses sign — see the live table in the next section. This is reported
+exactly as measured: resolving a real caveat is not the same as finding a
+real edge, and this project does not pretend otherwise.
+
+### Fixing a staleness bug in horizon-matching (2026-10-19)
+
+Found while re-running the live edge example above with the new basis
+correction: `pick_validated_horizon` was being fed `days_to_close`
+computed from *today's wall-clock date* to a market's `close_time` — a
+silent assumption that this project's cached EIA spot series is current.
+**It frequently is not** (the EIA cache was 5 real days stale, last
+observation 2026-10-14, as of this check). Using "now" instead of the
+forecast's actual data origin understates how far out the forecast is
+really being asked to extrapolate, which made `pick_validated_horizon`
+select an inappropriately *narrow* (overconfident) validated horizon —
+reintroducing the exact forecast-horizon-mismatch problem this machinery
+exists to prevent, just through the staleness gap instead of the market's
+own distance from today.
+
+**Real, measured difference this made, for a real market closing
+2026-10-20T18:30:00Z, checked 2026-10-19:**
+
+| Computed from | days_to_close | Matched horizon |
+|---|---|---|
+| wall-clock "now" (the old, buggy way) | 1.05 | **2** |
+| the EIA cache's own last observation (2026-10-14) — honest | 6.77 | **10** |
+
+Fixed with a new `edge.days_to_close_from_last_observation(close_time,
+last_observed_date)`, used in place of a bare `close_time - now` wherever
+this project matches a real market to a validated horizon. This is a real
+correctness fix (flagged here plainly, not silently folded into the
+benchmark work above) — any real paper bet sized under stale data without
+it would have been working from an overconfident, under-validated
+residual pool.
+
+**Real, live re-run of the edge example (2026-10-19, ~17:xx UTC) with both
+fixes applied — the real `KXWTI` ladder closing 2026-10-20T18:30:00Z,
+staleness-aware `days_to_close=6.77` → matched horizon 10, basis-corrected
+at mean −$6.86 (trusted: stdev $0.16, n=10):**
+
+| Strike | Raw P(exceed) | Corrected P(exceed) | Market P(exceed) | Raw edge | Corrected edge | Volume |
+|---|---|---|---|---|---|---|
+| $93.99 | 97.0% | 61.8% | 97.0% | −0.000 | −0.352 | 500.0 |
+| $95.99 | 91.0% | 41.6% | 90.5% | +0.005 | −0.489 | 245.5 |
+| $97.99 | 81.1% | 22.2% | 68.5% | +0.126 | −0.463 | 367.0 |
+| $99.99 | 69.1% | 8.2% | 35.5% | +0.336 | −0.273 | 175.0 |
+| $101.99 | 50.6% | 2.6% | 13.5% | +0.371 | −0.109 | 5,636.0 |
+| $103.99 | 29.8% | 0.9% | 4.5% | +0.253 | −0.036 | 30.0 |
+
+(Full 26-strike ladder available by re-running the snippet above against
+live data; this table samples across the strike range.)
+
+**The honest headline: with the staleness bug fixed, the *raw* (still
+benchmark-mismatched) edge is already much smaller than the original
+2026-10-16 example's 60-95-point apparent edges — most of that original
+gap was the horizon bug compounding with stale data, not the benchmark
+mismatch alone. Once the trustworthy basis correction is also applied,
+`EdgeEstimate.trustworthy` is `True` for every row above (both real
+caveats resolved) — and the resulting edge is consistently *negative*,
+not positive.** This project's own corrected, honestly-calibrated
+probability thinks these strikes are *less* likely to be exceeded than
+the real market does, not more. **No profitable, beats-the-edge claim is
+made here.** Both structural caveats named in "Edge vs. a real market
+price" above are now resolved, and resolving them did not produce a real
+edge — if anything, it removed one. This is the actual, measured
+conclusion, reported the same honest way every other result in this
+README is, not reframed to fit the "profitable" framing Daniel's
+2026-10-16 direction asked this project to investigate.
+
 ## What's next
 
 1. ~~Try `conformal-forecast`'s existing Adaptive Conformal Inference
@@ -880,13 +1030,30 @@ and not yet attempted).
    at 7 real horizons (1/2/3/5/10/15/21 trading days); `pick_validated_horizon`
    wires it into `compute_edge` so the horizon caveat clears for any real
    market closing within 21 days, which it now does in the re-run live
-   example above. **One real caveat down, one remaining:** the
-   settlement-benchmark mismatch is unaffected by this change and still
-   correctly fires on every real market checked so far — the real
-   remaining path is sourcing a historical ICE WTI futures series to
-   measure/correct the spot/futures basis against `KXWTI` directly (not
-   yet attempted). No "profitable, beats-the-edge" claim should be made
-   until that's done too.
+   example above. ~~Source a historical ICE WTI futures series (or a
+   measured basis) to resolve the settlement-benchmark mismatch.~~ **Done
+   (2026-10-19)** — see "Resolving the settlement-benchmark mismatch"
+   above: RCLC1/NYMEX was a dead end, but Kalshi's own settlement history
+   brackets the real ICE futures value directly, with no external vendor
+   needed. **Both real structural caveats are now resolved** — and a real
+   staleness bug in horizon-matching, found while re-running the live
+   example with the new correction, was fixed the same run (see "Fixing a
+   staleness bug in horizon-matching" above). **The honest conclusion:
+   resolving both caveats did not produce a profitable edge — the
+   corrected comparison's edge is consistently negative, not positive**
+   (see the live re-run table above). No "profitable, beats-the-edge"
+   claim is made, and the real next step is no longer "resolve the
+   caveats" but "investigate why no edge survives honest correction" —
+   candidates, not yet attempted: the real basis measured here is only
+   ~2.5 weeks of history (worth re-checking as more settlement dates
+   accumulate, since a contract roll could shift it again); the
+   `NaiveForecaster` point forecast may simply be too weak once the
+   genuinely-validated horizon is as wide as 10 trading days (worth
+   re-trying conformal-forecast's own LSTM/Transformer/N-BEATS model
+   families at this horizon specifically, not just at horizon=1 as
+   already checked); and the EIA spot cache's own staleness (still 5 real
+   days behind as of this writing) degrades the point forecast itself,
+   independent of which horizon it's matched to.
 
 ## Running it
 
