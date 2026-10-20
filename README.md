@@ -1119,6 +1119,47 @@ does not lower that bar just because the next snapshot could clear it. A
 third real recorded snapshot from a future run will produce this
 project's first real sign-consistency verdict.
 
+**A third real entry was recorded roughly a day and a half later**
+(a fresh, live `survey_live_edges` + `summarize_edge_subsets` run, 135
+real open markets, 0 skipped, at `2026-10-20T02:08:24Z`):
+
+```
+subset                    n   mean edge   mean |edge|
+all                     108     -0.0579        0.1512
+near-the-money           13     -0.3385        0.3385
+far-out-of-the-money     95     -0.0195        0.1256
+short-horizon              0         n/a           n/a
+long-horizon             108     -0.0579        0.1512
+liquid                   108     -0.0579        0.1512
+illiquid                   0         n/a           n/a
+```
+
+**With 3 of 3 required real snapshots now recorded, `summarize_persistence`
+produces this project's first real sign-consistency verdict, and the
+honest answer is "sign consistent, but still negative, not a
+profitable edge":** every subset with real data across all three
+snapshots (`all`, `near-the-money`, `far-out-of-the-money`,
+`long-horizon`, `liquid`) reports "sign consistent across all 3 real
+snapshots" — the mean edge has stayed negative (the project's own
+estimate running below the market's implied probability) on every one
+of the three real, live measurements taken over about a day and a half,
+not just a single noisy reading. `short-horizon` and `illiquid` still
+report "not enough real snapshots yet (0/3 needed)" — not because the
+machinery is broken, but because the real, live `KXWTI` ladder has never
+once had a market that actually fell into either of those subsets across
+any of the three real snapshots taken so far (every open market observed
+has had `n >= 5` trading days to settlement and enough real volume to
+count as liquid), an honest fact about the live ladder's own current
+shape, not a gap in this project's code. **This does not become a
+"beats-the-edge" or profitable claim — the opposite: a sign-consistent
+negative edge, now measured three separate times, is stronger evidence
+that this project's own calibrated probability really does run below
+the market's for the subsets it can currently observe, not stronger
+evidence of a tradeable opportunity.** Consistent with every other
+honest finding in this README: the real answer continues to be "no
+trustworthy, profitable signal found," now with three real data points
+instead of one.
+
 ## What's next
 
 1. ~~Try `conformal-forecast`'s existing Adaptive Conformal Inference
@@ -1240,16 +1281,22 @@ project's first real sign-consistency verdict.
 8. ~~Repeat the edge-subset survey on successive runs and check whether any
    one subset's edge sign/magnitude actually holds up over multiple real
    snapshots, which is the only way a *persistent* (not just
-   single-snapshot) edge claim could honestly be supported.~~ **Machinery
-   built and the first real snapshot recorded (2026-10-19, continued)** —
-   see "Tracking persistence across real snapshots" above:
-   `edge_persistence.py`, `data/edge_subset_history.jsonl`. Honestly
-   still in progress, not done: a real persistence verdict needs at least
-   `MIN_SNAPSHOTS_FOR_A_PERSISTENCE_VERDICT` (3) real recorded snapshots,
-   and only one exists so far. **A future run should call
-   `survey_live_edges` + `summarize_edge_subsets` +
-   `append_survey_snapshot` again (not re-use this run's numbers) and
-   check `summarize_persistence`'s output once 2-3 real entries exist.**
+   single-snapshot) edge claim could honestly be supported.~~ **Done
+   (2026-10-20): the third real snapshot unlocked this project's first
+   real sign-consistency verdict** — see "Tracking persistence across
+   real snapshots" above. Honest result: every subset with real data
+   (`all`/`near-the-money`/`far-out-of-the-money`/`long-horizon`/`liquid`)
+   is sign-consistent and negative across all 3 real snapshots —
+   evidence the negative edge is real and stable, not evidence of a
+   profitable opportunity. `short-horizon`/`illiquid` still have 0/3
+   real snapshots with data, an honest fact about the live ladder's
+   current shape (it has never contained a market short enough to
+   settlement, or thin enough on volume, to populate those subsets in
+   any of the three surveys taken so far), not a code gap. **Remaining
+   real work: keep accumulating snapshots over a longer real window
+   (weeks, not days) to see whether the magnitude — not just the sign —
+   stays stable, and keep watching whether a `short-horizon`/`illiquid`
+   market ever actually appears on the live ladder.**
 
 ## Running it
 
