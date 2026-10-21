@@ -1219,6 +1219,52 @@ coincidence for a real pattern. `short-horizon`/`illiquid` still have
 0/4 real snapshots with any data — the live ladder has still never had a
 market fall into either bucket.
 
+**A fifth real entry was recorded on 2026-10-21** (`2026-10-21T14:28:04Z`),
+the first snapshot taken after the v0.7.0 model-comparison work below —
+a fresh, live `survey_live_edges` + `summarize_edge_subsets` run against a
+real ladder that had grown substantially since the fourth snapshot: 135
+real open markets scored (vs. 105 before), 19 excluded as untrustworthy
+(vs. 2 before — the live `KXWTI` ladder itself has simply grown, not a
+code change):
+
+```
+subset                    n   mean edge   mean |edge|
+all                     116     -0.0514        0.1507
+near-the-money           19     -0.3387        0.3387
+far-out-of-the-money     97     +0.0049        0.1139
+short-horizon             0         n/a           n/a
+long-horizon            116     -0.0514        0.1507
+liquid                  116     -0.0514        0.1507
+illiquid                  0         n/a           n/a
+```
+
+**With a fifth real data point in hand, every verdict held exactly where
+the fourth snapshot left it — no new flip, no new correction.**
+`all`/`near-the-money`/`long-horizon`/`liquid` extend their sign-consistent
+negative streak to 5/5 real snapshots; `near-the-money`'s edge again
+lands solidly negative and comparatively large (-0.34, in the same -0.29
+to -0.34 band every prior snapshot has shown). `far-out-of-the-money`
+stayed positive (+0.0049, versus +0.0061 at the fourth snapshot) — small
+and still near zero, exactly the kind of value the fourth snapshot's own
+retraction described as "looks like noise": `summarize_persistence`
+reports it unchanged as "sign flipped across the 5 real snapshots
+recorded so far — looks like noise, not a persistent edge," neither a
+second flip nor a return to "consistent." `short-horizon`/`illiquid`
+remain at 0/5 real snapshots with any data. This snapshot is purely a
+new, real, forward-only data point appended to
+`data/edge_subset_history.jsonl` — no code changed, version bumped to
+0.7.1.
+
+**Also re-checked this run: the real EIA source itself, not just this
+project's cache, is still stuck at 2026-10-14.** Fetched `RWTCd.xls`
+directly and inspected its own last rows (not just this project's parsed
+output) — EIA's own published spreadsheet has not added a row past
+2026-10-14 either, confirming this is a genuine upstream publishing gap,
+not a bug in `fetch_wti_daily`'s parsing. The second forward-prediction
+batch (from 2026-10-15) remains correctly `outcome: "pending"` — now a
+full week past its last new data point, worth Daniel's attention if the
+gap keeps growing (see "What's next").
+
 ## Does a stronger point model help at the horizon markets actually need? (v0.7, 2026-10-21)
 
 The original "Does a stronger point model help?" check above (2026-10-15)
@@ -1456,13 +1502,21 @@ cell and a best-MAE marker. Full suite verified: **134/134 passed.**
    `long-horizon`/`liquid` remain sign-consistent across all 4. This is
    the 3-snapshot bar's own honesty working as designed, not a bug: a
    verdict reached at the minimum threshold can and did get corrected by
-   the next real data point. **Remaining real work: keep accumulating
-   snapshots over a longer real window (weeks, not days) to see whether
-   `far-out-of-the-money`'s sign keeps oscillating near zero (consistent
-   with "never a real effect") or resettles one way, whether the larger
-   subsets' magnitude — not just sign — stays stable, and keep watching
-   whether a `short-horizon`/`illiquid` market ever actually appears on
-   the live ladder.**
+   the next real data point. **Updated (2026-10-21): a fifth real
+   snapshot left every verdict exactly where the fourth left it.**
+   `all`/`near-the-money`/`long-horizon`/`liquid` extend to 5/5
+   sign-consistent (negative); `far-out-of-the-money` stayed positive
+   (its post-flip state), so `summarize_persistence` still reports it as
+   "looks like noise" — no second flip, no return to "consistent." One
+   data point alone doesn't resolve whether `far-OTM` has settled one way
+   or is still oscillating; that needs more snapshots over more time.
+   **Remaining real work: keep accumulating snapshots over a longer real
+   window (weeks, not days) to see whether `far-out-of-the-money`'s sign
+   keeps oscillating near zero (consistent with "never a real effect") or
+   resettles one way, whether the larger subsets' magnitude — not just
+   sign — stays stable, and keep watching whether a
+   `short-horizon`/`illiquid` market ever actually appears on the live
+   ladder.**
 
 ## Running it
 
