@@ -82,10 +82,24 @@ def survey_live_edges(
     alpha: float = 0.1,
     min_volume_for_trust: float = 1.0,
     refresh_spot: bool = False,
+    series=None,
 ) -> tuple[list[SurveyedEdge], list[str]]:
     """Real cross-sectional edge survey across every real, currently-open
     market in `series_ticker`. See the module docstring for the honest
     scope (one live snapshot, not a persistence claim).
+
+    `series` defaults to a real fetch (`fetch_wti_daily(refresh=refresh_spot)`)
+    -- pass an explicit one (e.g. in tests) to pin what "last observed
+    date" this call uses, the same escape hatch `track_record.py`'s own
+    `resolve_pending_predictions` already offers for the same reason: this
+    function's output depends on *when* it's run relative to the real spot
+    series, so a test that wants a deterministic, time-independent result
+    (rather than one that silently drifts whenever the real committed data
+    cache is next refreshed) needs a way to freeze that input. (v0.7.2:
+    added after a real cache refresh broke three tests whose fixtures
+    assumed a specific, now-stale last-observed date -- see the README's
+    "Edge-subset survey" section and Known issue tracking in
+    `active-project-kalshi.md` for the full account.)
 
     Returns `(surveyed, skipped)`: `surveyed` holds one `SurveyedEdge` per
     real open market this project could honestly score; `skipped` holds a
@@ -97,7 +111,8 @@ def survey_live_edges(
     already validated.
     """
     quotes = fetch_markets(series_ticker, status="open")
-    series = fetch_wti_daily(refresh=refresh_spot)
+    if series is None:
+        series = fetch_wti_daily(refresh=refresh_spot)
     last_observed_date = series.index.max()
     last_observed_price = float(series.iloc[-1])
 
