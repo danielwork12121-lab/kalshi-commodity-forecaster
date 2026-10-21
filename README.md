@@ -109,6 +109,17 @@ commodity_forecast/
                    subset's edge sign has actually held up over time rather
                    than being single-snapshot noise; see "Tracking
                    persistence across real snapshots" below
+  horizon_model_comparison.py (since 2026-10-21, v0.7)
+                   run_horizon_model_comparison / format_horizon_model_comparison
+                   -- re-runs the real MAE/coverage/Brier/calibration-error
+                   backtest at every already-validated forecast horizon for
+                   naive, lstm, and conformal-forecast's own
+                   TransformerForecaster (via forecast.py's new
+                   fit_calibrated_forecaster_horizon model_name option),
+                   answering whether a stronger point model helps once the
+                   horizon is genuinely validated rather than always
+                   horizon=1; see "Does a stronger point model help at the
+                   horizon markets actually need?" below
 tests/
   test_data.py         date-math unit test + live EIA integration test + cache-hit test
   test_forecast.py     synthetic-data + real-WTI-series end-to-end tests, static and ACI
@@ -143,6 +154,11 @@ tests/
                         roundtrip checks, real-JSONL-file checks, and the
                         "not enough data yet" / sign-consistent /
                         sign-flipped persistence-verdict logic
+  test_horizon_model_comparison.py (since 2026-10-21, v0.7) confirms
+                        model_name="naive" reproduces the existing
+                        naive-only horizon forecaster exactly, that
+                        lstm/transformer really do fit different models,
+                        and that the comparison runs every requested cell
 data/
   wti_spot_daily.csv real cached WTI daily spot price series, 1986-01-02 to present
   edge_subset_history.jsonl (since 2026-10-19, continued) the real,
@@ -1203,6 +1219,90 @@ coincidence for a real pattern. `short-horizon`/`illiquid` still have
 0/4 real snapshots with any data — the live ladder has still never had a
 market fall into either bucket.
 
+## Does a stronger point model help at the horizon markets actually need? (v0.7, 2026-10-21)
+
+The original "Does a stronger point model help?" check above (2026-10-15)
+ran at `horizon=1` — the one this project later found isn't what a real,
+live Kalshi `KXWTI` market actually needs (most open markets close several
+trading days to a few weeks out; see "Resolving the forecast-horizon
+mismatch" above). That check's honest answer was "no, not measurably" —
+WTI's near-random-walk behavior means the LSTM converges to essentially
+the same zero-delta forecast `NaiveForecaster` already makes. Whether that
+finding holds at every horizon this project has since validated a
+residual pool for, or breaks down somewhere a longer horizon gives a
+model more room to find a real pattern, was never checked — this closes
+that gap: `forecast.fit_calibrated_forecaster_horizon` (a new `model_name`
+option on the existing horizon-validated pipeline, `model_name="naive"`
+confirmed to reproduce `fit_calibrated_naive_forecaster_horizon` exactly)
+plus `horizon_model_comparison.run_horizon_model_comparison`, re-running
+the real MAE/coverage/Brier/calibration-error backtest at all seven
+already-validated horizons for `naive`, `lstm`, and conformal-forecast's
+own `TransformerForecaster` (shipped there 2026-10-15, not yet tried here
+until now).
+
+**Real, measured result on the full live WTI series (lookback=5, alpha=0.1,
+seed=0) — genuinely different from the horizon=1 finding, not a repeat of it:**
+
+| Horizon | Model | MAE ($/bbl) | Coverage | Brier | Mean calib. error |
+|---|---|---|---|---|---|
+| 1  | naive **← best MAE** | $1.43 | 80.7% (-9.3pp) | 0.0905 | 0.0261 |
+| 1  | lstm | $1.44 | 80.5% (-9.5pp) | 0.0908 | 0.0266 |
+| 1  | transformer | $1.44 | 81.0% (-9.0pp) | 0.0908 | 0.0255 |
+| 2  | naive **← best MAE** | $2.06 | 78.6% (-11.4pp) | 0.1163 | 0.0431 |
+| 2  | lstm | $2.06 | 78.9% (-11.1pp) | 0.1154 | 0.0410 |
+| 2  | transformer | $2.06 | 78.7% (-11.3pp) | 0.1153 | 0.0396 |
+| 3  | naive | $2.52 | 77.1% (-12.9pp) | 0.1328 | 0.0428 |
+| 3  | transformer **← best MAE** | $2.50 | 77.3% (-12.7pp) | 0.1333 | 0.0434 |
+| 5  | naive | $3.15 | 77.3% (-12.7pp) | 0.1521 | 0.0570 |
+| 5  | transformer **← best MAE** | $3.13 | 77.8% (-12.2pp) | 0.1510 | 0.0507 |
+| 10 | naive | $4.25 | 81.5% (-8.5pp) | 0.1750 | 0.0494 |
+| 10 | transformer **← best MAE** | $4.16 | 82.6% (-7.4pp) | 0.1723 | 0.0420 |
+| 15 | naive | $5.12 | 81.4% (-8.6pp) | 0.1918 | 0.0466 |
+| 15 | transformer **← best MAE** | $5.00 | 83.7% (-6.3pp) | 0.1881 | 0.0390 |
+| 21 | naive | $6.18 | 81.7% (-8.3pp) | 0.2064 | 0.0552 |
+| 21 | transformer **← best MAE** | $6.04 | 84.1% (-5.9pp) | 0.2031 | 0.0455 |
+
+(Full table, every model at every horizon, in the real CLI/test output —
+the `lstm` row is omitted above past horizon=2 only to keep this table
+readable; it never wins on MAE at any horizon and tracks `naive` closely
+throughout, same as the original horizon=1 finding.)
+
+**Honest conclusion: the horizon=1 "no, not measurably" finding does NOT
+generalize to every horizon — there's a real, growing effect starting
+around horizon=3 that the original single-horizon check could not have
+seen.** At horizons 1–2, `naive` remains the best point model, same as
+before. From horizon 3 onward, the Transformer is consistently the best
+MAE — a small edge at horizon 3 ($2.50 vs. $2.52) that grows at the
+longest horizons tested (horizon 21: $6.04 vs. $6.18, a real ~2.3% MAE
+reduction) — and, more relevant to this project's own probability layer,
+its coverage gap is consistently *smaller* than naive's at every horizon
+from 10 onward (e.g. horizon 21: -5.9pp vs. -8.3pp) along with a lower
+mean calibration error (e.g. horizon 21: 0.0455 vs. 0.0552). The LSTM, by
+contrast, never meaningfully separates from `naive` at any horizon tested
+— the effect is specific to the Transformer architecture here, not "any
+neural model helps once the horizon is long enough."
+
+**What this does NOT do:** this is a comparison, not a swap — `edge.py`'s
+real, live edge computation (and every number in the "Edge vs. a real
+market price" / persistence-tracking sections above) still uses
+`fit_calibrated_naive_forecaster_horizon` exactly as before. Replacing the
+live pipeline's model choice is a real, separate decision (it would
+change every downstream edge number this project has already
+honestly reported, and deserves its own dedicated re-run and caveat
+discussion, not a silent swap bundled into a comparison feature) — left
+as the natural next step for a future run, not done here.
+
+5 new tests (129 → 134, all in `tests/test_horizon_model_comparison.py`):
+`model_name="naive"` is confirmed to reproduce
+`fit_calibrated_naive_forecaster_horizon`'s own output exactly (same MAE,
+coverage, interval width, residual pool) on the real WTI series at three
+different horizons; an unknown `model_name` raises; `lstm`/`transformer`
+are confirmed to actually fit different models (not silently fall back to
+naive) via real, different per-model diagnostics on a seeded synthetic
+series; the comparison runs every requested `(horizon, model_name)` cell
+and reports real, bounded numbers; and the formatted table includes every
+cell and a best-MAE marker. Full suite verified: **134/134 passed.**
+
 ## What's next
 
 1. ~~Try `conformal-forecast`'s existing Adaptive Conformal Inference
@@ -1309,18 +1409,29 @@ market fall into either bucket.
    Honest result: no, not a real one — the one subset that looked
    different (near-the-money) is explained by this project's own
    already-known EIA staleness gap, not a genuine market inefficiency.
-   Remaining candidates, not yet attempted: the real basis measured here
-   is only ~2.5 weeks of history (worth re-checking as more settlement
-   dates accumulate, since a contract roll could shift it again); the
+   Remaining candidates: the real basis measured here is only ~2.5 weeks
+   of history (worth re-checking as more settlement dates accumulate,
+   since a contract roll could shift it again); and the EIA spot cache's
+   own staleness (7 real days behind as of this writing — the gap keeps
+   growing, see the open item below) degrades the point forecast itself,
+   independent of which horizon it's matched to — the edge-subset survey
+   above is itself new evidence that this specific gap matters most right
+   where it would be most tempting to look for a real edge. ~~The
    `NaiveForecaster` point forecast may simply be too weak once the
    genuinely-validated horizon is as wide as 10 trading days (worth
    re-trying conformal-forecast's own LSTM/Transformer/N-BEATS model
    families at this horizon specifically, not just at horizon=1 as
-   already checked); and the EIA spot cache's own staleness (still 5 real
-   days behind as of this writing) degrades the point forecast itself,
-   independent of which horizon it's matched to — the edge-subset survey
-   above is itself new evidence that this specific gap matters most
-   right where it would be most tempting to look for a real edge.
+   already checked).~~ **Checked (v0.7, 2026-10-21)** — see "Does a
+   stronger point model help at the horizon markets actually need?"
+   above. Real, genuinely different answer from the horizon=1 check: a
+   Transformer model shows a real, growing MAE and coverage-gap
+   improvement over `naive` starting around horizon=3, reaching a ~2.3%
+   MAE reduction and a meaningfully smaller coverage gap by horizon=21 —
+   not implemented in the live `edge.py` pipeline yet (a model swap there
+   is a separate decision, deliberately left undone this run — see that
+   section's own "What this does NOT do" note), but the live pipeline's
+   `NaiveForecaster` choice is no longer unexamined at the horizons that
+   matter.
 8. ~~Repeat the edge-subset survey on successive runs and check whether any
    one subset's edge sign/magnitude actually holds up over multiple real
    snapshots, which is the only way a *persistent* (not just
