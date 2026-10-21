@@ -30,6 +30,33 @@ def _load_settlement_history_quotes():
     return [_parse_market(m) for m in raw["markets"]]
 
 
+def _frozen_spot_series_through_2026_10_14():
+    """A frozen copy of this project's own real `data/wti_spot_daily.csv`
+    cache as it stood through 2026-10-14 -- the exact state the three
+    tests below were originally written and verified against (their own
+    docstrings say so explicitly: "this project's own cached spot series
+    ends 2026-10-14"). Loaded via the real `fetch_wti_daily`, not
+    hand-built, so these tests exercise the real loading path -- just
+    pointed at a fixture file instead of the live, evolving committed
+    cache.
+
+    Why this exists (v0.7.2): a real EIA data refresh (new real
+    observations through 2026-10-20, after a week-plus publication gap)
+    moved `data/wti_spot_daily.csv`'s own last-observed date forward,
+    which silently broke all three tests below -- their fixture ladder
+    closes 2026-10-19, so once the live cache's last-observed date passed
+    that close time, every market in it looked like it had already closed
+    and got skipped as "before the last observed spot date," collapsing
+    `surveyed` from 30 to 0. Not a bug in `survey_live_edges` itself (it
+    did exactly what it's supposed to: skip a market that's already
+    closed) -- a real test-design fragility, now fixed by freezing the
+    one input (the spot series) these tests actually need held constant,
+    via `survey_live_edges`'s new `series=` parameter."""
+    from commodity_forecast.data import fetch_wti_daily
+
+    return fetch_wti_daily(cache_path=FIXTURES / "wti_spot_daily_through_2026-10-14.csv", refresh=False)
+
+
 def _estimate(edge: float, trustworthy: bool, volume: float = 100.0, **overrides) -> EdgeEstimate:
     defaults = dict(
         computed_at_utc="2026-10-19T00:00:00+00:00",
@@ -138,7 +165,7 @@ def test_survey_live_edges_scores_the_real_captured_open_ladder(monkeypatch):
         lambda *a, **kw: bracket_settlements(settlement_quotes),
     )
 
-    surveyed, skipped = survey_live_edges(refresh_spot=False)
+    surveyed, skipped = survey_live_edges(series=_frozen_spot_series_through_2026_10_14())
 
     # All 30 real markets in this fixture are "greater than $X" questions
     # closing on a real, validatable horizon (this project's own cached
@@ -190,7 +217,7 @@ def test_survey_live_edges_skips_a_market_with_an_unsupported_strike_type(monkey
         lambda *a, **kw: bracket_settlements(settlement_quotes),
     )
 
-    surveyed, skipped = survey_live_edges(refresh_spot=False)
+    surveyed, skipped = survey_live_edges(series=_frozen_spot_series_through_2026_10_14())
     assert len(surveyed) == 30
     assert len(skipped) == 1
     assert "KXWTI-TEST-RANGE" in skipped[0]
@@ -225,8 +252,33 @@ def test_survey_live_edges_skips_a_market_beyond_every_validated_horizon(monkeyp
         lambda *a, **kw: bracket_settlements(settlement_quotes),
     )
 
-    surveyed, skipped = survey_live_edges(refresh_spot=False)
+    surveyed, skipped = survey_live_edges(series=_frozen_spot_series_through_2026_10_14())
     assert len(surveyed) == 30
     assert len(skipped) == 1
     assert "KXWTI-TEST-FAROUT" in skipped[0]
     assert "exceeds every horizon" in skipped[0]
+
+
+def test_survey_live_edges_passing_series_never_calls_fetch_wti_daily(monkeypatch):
+    """The actual regression test for v0.7.2's fix: passing `series=`
+    explicitly must bypass `fetch_wti_daily` entirely, not just override
+    its result -- otherwise a test (or any other caller pinning the input
+    deliberately) would still be silently coupled to whatever the real,
+    live-refreshed cache currently contains, which is exactly the
+    fragility this parameter exists to remove."""
+    open_quotes = _load_open_ladder_quotes()
+    settlement_quotes = _load_settlement_history_quotes()
+
+    def _must_not_be_called(*args, **kwargs):
+        raise AssertionError("fetch_wti_daily should not be called when series= is given")
+
+    monkeypatch.setattr("commodity_forecast.edge_survey.fetch_markets", lambda *a, **kw: open_quotes)
+    monkeypatch.setattr(
+        "commodity_forecast.edge_survey.fetch_settlement_brackets",
+        lambda *a, **kw: bracket_settlements(settlement_quotes),
+    )
+    monkeypatch.setattr("commodity_forecast.edge_survey.fetch_wti_daily", _must_not_be_called)
+
+    surveyed, skipped = survey_live_edges(series=_frozen_spot_series_through_2026_10_14())
+    assert skipped == []
+    assert len(surveyed) == 30
