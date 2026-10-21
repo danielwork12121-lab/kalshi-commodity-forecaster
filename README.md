@@ -1160,6 +1160,49 @@ honest finding in this README: the real answer continues to be "no
 trustworthy, profitable signal found," now with three real data points
 instead of one.
 
+**A fourth real entry was recorded about 21 hours later** — the first
+snapshot spaced a genuinely different time of day from the first three
+(which were all taken within about a day and a half of each other) — a
+fresh, live `survey_live_edges` + `summarize_edge_subsets` run, 105 real
+open markets, 2 excluded as untrustworthy, at `2026-10-20T23:06:52Z`:
+
+```
+subset                    n   mean edge   mean |edge|
+all                     103     -0.0284        0.1377
+near-the-money           12     -0.2902        0.2902
+far-out-of-the-money     91     +0.0061        0.1176
+short-horizon             0         n/a           n/a
+long-horizon            103     -0.0284        0.1377
+liquid                  103     -0.0284        0.1377
+illiquid                  0         n/a           n/a
+```
+
+**With a fourth real data point in hand, the honest picture changed for
+one subset, and did not for the rest.** `far-out-of-the-money` — the
+subset closest to zero in every prior snapshot (-0.0049, -0.0195, and now
++0.0061) — flipped sign for the first time, and `summarize_persistence`
+now correctly reports it as "sign flipped across the 4 real snapshots
+recorded so far — looks like noise, not a persistent edge," retracting
+the "sign consistent" verdict it briefly held at 3 snapshots. This is
+exactly the kind of correction this project's own 3-snapshot bar was
+built honestly to allow — a verdict reached at the minimum threshold is
+not guaranteed to survive the next real data point, and this project
+reports that honestly rather than keeping the now-outdated "consistent"
+label. `all`, `near-the-money`, `long-horizon`, and `liquid` remain sign
+consistent across all 4 real snapshots — `near-the-money`'s own edge in
+particular has stayed solidly negative and comparatively large in
+magnitude (-0.29 to -0.34) every single time, unlike `far-OTM`'s
+consistently-near-zero, now sign-flipping values. The honest reading: the
+larger, further-from-zero edges (`all`, `near-the-money`) look like a
+real, stable effect; the smallest-magnitude subset (`far-out-of-the-money`,
+which dominates "all" numerically since it's ~90% of the ladder by count
+but contributes less of "all"'s magnitude per-market) looks like it was
+never more than noise oscillating around zero, and a 4-snapshot history is
+what it took to see that distinction rather than mistake a small-sample
+coincidence for a real pattern. `short-horizon`/`illiquid` still have
+0/4 real snapshots with any data — the live ladder has still never had a
+market fall into either bucket.
+
 ## What's next
 
 1. ~~Try `conformal-forecast`'s existing Adaptive Conformal Inference
@@ -1292,11 +1335,23 @@ instead of one.
    real snapshots with data, an honest fact about the live ladder's
    current shape (it has never contained a market short enough to
    settlement, or thin enough on volume, to populate those subsets in
-   any of the three surveys taken so far), not a code gap. **Remaining
-   real work: keep accumulating snapshots over a longer real window
-   (weeks, not days) to see whether the magnitude — not just the sign —
-   stays stable, and keep watching whether a `short-horizon`/`illiquid`
-   market ever actually appears on the live ladder.**
+   any of the three surveys taken so far), not a code gap. **Updated
+   (2026-10-20, ~21 hours later): a fourth real snapshot already changed
+   the picture for one subset.** `far-out-of-the-money` — the subset
+   whose edge had stayed closest to zero across all three prior
+   snapshots — flipped sign, and `summarize_persistence` correctly
+   retracted its "sign consistent" verdict for that subset ("looks like
+   noise, not a persistent edge"), while `all`/`near-the-money`/
+   `long-horizon`/`liquid` remain sign-consistent across all 4. This is
+   the 3-snapshot bar's own honesty working as designed, not a bug: a
+   verdict reached at the minimum threshold can and did get corrected by
+   the next real data point. **Remaining real work: keep accumulating
+   snapshots over a longer real window (weeks, not days) to see whether
+   `far-out-of-the-money`'s sign keeps oscillating near zero (consistent
+   with "never a real effect") or resettles one way, whether the larger
+   subsets' magnitude — not just sign — stays stable, and keep watching
+   whether a `short-horizon`/`illiquid` market ever actually appears on
+   the live ladder.**
 
 ## Running it
 
