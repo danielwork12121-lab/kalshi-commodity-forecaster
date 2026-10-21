@@ -101,7 +101,13 @@ commodity_forecast/
                    real subsets (strike distance, horizon, liquidity) to
                    honestly check whether any slice of the ladder looks
                    different from the ladder-wide average; see "An
-                   edge-subset survey" below
+                   edge-subset survey" below. (v0.7.2) survey_live_edges
+                   gained a series= parameter (mirroring track_record.py's
+                   own resolve_pending_predictions) so a caller can pin
+                   the spot series used instead of always fetching live --
+                   added after a real cache refresh broke three tests that
+                   implicitly depended on it; see "Real EIA data resumes"
+                   below
   edge_persistence.py (since 2026-10-19, continued) append_survey_snapshot
                    / load_survey_history / summarize_persistence -- records
                    each real edge_survey.py run to data/edge_subset_history.jsonl
@@ -149,7 +155,13 @@ tests/
                         plus a real end-to-end run of survey_live_edges
                         against a real captured, currently-open KXWTI
                         ladder and a real settlement-history fixture --
-                        confirms nothing is silently skipped/scored wrong
+                        confirms nothing is silently skipped/scored wrong.
+                        (v0.7.2) the end-to-end tests now pin the spot
+                        series via a frozen fixture
+                        (fixtures/wti_spot_daily_through_2026-10-14.csv)
+                        instead of the live committed cache, plus a
+                        regression test confirming series= really bypasses
+                        fetch_wti_daily
   test_edge_persistence.py (since 2026-10-19, continued) append/load
                         roundtrip checks, real-JSONL-file checks, and the
                         "not enough data yet" / sign-consistent /
@@ -160,7 +172,13 @@ tests/
                         lstm/transformer really do fit different models,
                         and that the comparison runs every requested cell
 data/
-  wti_spot_daily.csv real cached WTI daily spot price series, 1986-01-02 to present
+  wti_spot_daily.csv real cached WTI daily spot price series, 1986-01-02 to
+                     present. Never hand-edited -- a refresh overwrites it
+                     with the real series as of that moment. (v0.7.2) a
+                     real refresh after a week-plus EIA publication gap
+                     found that EIA itself revises its own most recent
+                     ~2-3 days of preliminary data after the fact; see
+                     "Real EIA data resumes" below
   edge_subset_history.jsonl (since 2026-10-19, continued) the real,
                      append-only, forward-only history of edge-subset
                      survey snapshots -- one real JSON line per real
@@ -168,7 +186,9 @@ data/
 predictions/
   README.md         explains the forward track record's format and resolution rule
   track_record.jsonl the real, dated predictions themselves (first batch made and
-                      resolved 2026-10-15)
+                      resolved 2026-10-15; second batch made 2026-10-15,
+                      resolved 2026-10-21 once real data moved again; third
+                      batch made 2026-10-21, pending)
   paper_bets.jsonl  (since 2026-10-16) real, timestamped, paper-only
                      (never executed) simulated bets sized by edge.py,
                      resolved later against each market's own real
@@ -614,17 +634,25 @@ prior batch, per the no-self-grading rule), against the real cached
 series refreshed the same run (last real observation: 2026-10-14,
 $101.91/bbl):
 
-| Made at (UTC) | Last observed | Question | Threshold | P(exceed) | Outcome |
-|---|---|---|---|---|---|
-| 2026-10-15 22:46:22 | 2026-10-14, $101.91 | Will the next real observed price be *above* $101.91 (flat)? | $101.91 | 51.4% | pending |
-| 2026-10-15 22:46:31 | 2026-10-14, $101.91 | Will the next real observed price be *above* $103.95 (+2%)? | $103.95 | 5.0% | pending |
-| 2026-10-15 22:46:41 | 2026-10-14, $101.91 | Will the next real observed price be *above* $99.87 (-2%)? | $99.87 | 94.5% | pending |
+| Made at (UTC) | Last observed | Question | Threshold | P(exceed) | Resolved against | Outcome |
+|---|---|---|---|---|---|---|
+| 2026-10-15 22:46:22 | 2026-10-14, $101.91 | Will the next real observed price be *above* $101.91 (flat)? | $101.91 | 51.4% | 2026-10-15, $104.71 | **exceeded** |
+| 2026-10-15 22:46:31 | 2026-10-14, $101.91 | Will the next real observed price be *above* $103.95 (+2%)? | $103.95 | 5.0% | 2026-10-15, $104.71 | **exceeded** |
+| 2026-10-15 22:46:41 | 2026-10-14, $101.91 | Will the next real observed price be *above* $99.87 (-2%)? | $99.87 | 94.5% | 2026-10-15, $104.71 | **exceeded** |
 
-All three are genuinely pending — EIA had not published anything newer
-than 2026-10-14 at the time these were made (confirmed via a fresh
-`fetch_wti_daily(refresh=True)` the same run), so there is no future data
-yet for any of them to resolve against. A later run should resolve these
-once newer data exists, never this one.
+All three were genuinely pending for a full week — EIA had not published
+anything newer than 2026-10-14 at the time these were made, and stayed
+stuck there for the longest publication gap this project has observed
+(confirmed fresh by multiple later runs, never just assumed from a prior
+check). **Resolved 2026-10-21**, once EIA published again, against the
+first new real observation, 2026-10-15 ($104.71/bbl) — strictly the first
+point after `last_observed_date`, same rule as the first batch. All three
+resolved `"exceeded"` this time (vs. the first batch's 2-"not exceeded" /
+1-"exceeded" split) — the real price move from $101.91 to $104.71 cleared
+even the +2% threshold ($103.95), if only by about $0.76. Reported exactly
+as measured; see "Real EIA data resumes after a week-plus gap" below for
+the full account, including a third batch made the same run this second
+batch resolved.
 
 ## Edge vs. a real market price (2026-10-16 — real data, honest negative finding)
 
@@ -1349,6 +1377,145 @@ series; the comparison runs every requested `(horizon, model_name)` cell
 and reports real, bounded numbers; and the formatted table includes every
 cell and a best-MAE marker. Full suite verified: **134/134 passed.**
 
+## Real EIA data resumes after a week-plus gap — resolutions, a new prediction batch, a sixth snapshot, a real test fragility found and fixed, and a genuine data-revision finding (v0.7.2, 2026-10-21)
+
+Every run from 2026-10-14 through the fifth persistence snapshot above
+independently re-confirmed the same thing, directly from EIA's own
+published spreadsheet, not just this project's cache: no new daily WTI
+spot observation past 2026-10-14. **This run re-checked the same way —
+and this time EIA had published again.** A real, fresh
+`fetch_wti_daily(refresh=True)` pulled 4 new real observations
+(2026-10-15 through 2026-10-20) and, in the same pull, revealed something
+this project had not observed before: **EIA revises its own most recent
+~2-3 days of "preliminary" daily data after the fact.** The committed
+cache's own last 3 pre-existing rows changed value on this refresh —
+
+```
+date          before      after
+2026-10-12    98.73       94.99
+2026-10-13    100.86      95.39
+2026-10-14    101.91      96.34
+```
+
+— while every row before 2026-10-12 stayed byte-for-byte identical (diffed
+directly, not assumed). This is a genuine property of the real upstream
+source, not a bug in `fetch_wti_daily`'s own fetch/parse/cache logic: the
+same three most-recent trading days were still "fresh" enough to be
+revised the next time EIA's own spreadsheet was re-downloaded, exactly the
+kind of thing a real statistical agency does with preliminary data before
+finalizing it. Because `fetch_wti_daily`'s cache is, by design, "never
+hand-edited... every refresh overwrites the cache with the real series as
+of that moment" (see `data.py`'s own docstring), this project's committed
+cache now reflects the corrected values — any past README passage quoting
+"2026-10-14 ($101.91/bbl)" was accurate as of when it was measured, not
+retroactively wrong, but is no longer what the live cache reports for that
+date.
+
+**This does not contaminate any past, already-made prediction.** Every
+`PredictionRecord`'s `threshold_usd` is computed once, at `make_at_utc`
+time, from whatever `last_price` the live series reported *then*, and
+written immutably into `predictions/track_record.jsonl` — a later
+revision of that same historical date's spot value cannot reach back and
+change an already-logged threshold. Only predictions made *after* this
+refresh use the corrected recent values as their own `last_observed_price_usd`.
+
+**Resolving the second prediction batch (pending for a full week):** all
+3 "pending" records (made 2026-10-15, `last_observed_date: 2026-10-14`,
+thresholds 99.87/101.91/103.95) resolved against the first new real data
+point — 2026-10-15's $104.71 — via the existing, unmodified
+`resolve_pending_predictions`, which needs no code change for a wider gap:
+it resolves against whatever the first real future point turns out to be,
+however long the wait. All three resolved `"exceeded"` (104.71 is above
+all three real thresholds this time, unlike the first batch's 2-vs-1
+split) — reported exactly as measured, not reframed.
+
+**A third real forward-prediction batch was then made** (same 3
+`relative_offset` values as every batch before it: 0.0, +0.02, -0.02),
+anchored to the now-current real last observation, `2026-10-20 ($107.89)`
+— thresholds $107.89 / $110.0478 / $105.7322, predicted probabilities
+0.514 / 0.043 / 0.953. Pending, same honest forward-only discipline as
+every prediction before it.
+
+**A sixth persistence snapshot was then recorded — and it came back with
+zero trustworthy edges in every subset, for a real, honest reason rather
+than a bug:** `survey_live_edges` gates every scored edge on
+`describe_basis_correction`'s own quality check
+(`stdev <= 1.0`, `n >= 5` on the most recent 10 real basis measurements);
+this run's real, live measurement came back with `stdev=3.19`, well over
+that bar, so every one of the 105 real open markets surveyed was correctly
+marked untrustworthy and excluded from every subset summary (`n=0`
+across the board). **The cause, traced directly rather than assumed:**
+the basis-measurement window's 10 most recent real `(futures, spot)` pairs
+mixes dates from before and after the cache refresh above —
+
+```
+date          futures_mid   spot (now)   basis
+2026-10-09    91.74         98.73        -6.99
+2026-10-13    94.24         95.39        -1.15   <- revised-down spot narrows this one sharply
+2026-10-14    95.24         96.34        -1.10   <- same
+2026-10-15    96.74         104.71       -7.97
+2026-10-16    99.24         108.21       -8.97
+2026-10-19    98.74         110.01      -11.27
+2026-10-20    97.74         107.89      -10.15
+```
+
+— so the two revised dates (10-13, 10-14) sit at roughly -1.1 while every
+real neighboring measurement runs -7 to -11, a genuine (not fabricated)
+discontinuity caused entirely by the interaction of two real, honest
+behaviors: this project's basis estimator trusting whatever the cache
+currently says for a given historical date, and EIA itself still revising
+that date's value days later. `summarize_persistence` handled this
+correctly without any code change — a snapshot with `n=0` for a subset
+contributes no sign either way and is excluded from that subset's
+sign-consistency count by design (see `edge_persistence.py`'s own
+docstring), so every subset's real streak still reads "5" real snapshots
+with data, not "6," and no verdict was corrupted by the zero-edge
+snapshot. This snapshot is recorded in `data/edge_subset_history.jsonl`
+exactly as measured — a real `n=0` result is still real data, not an error
+to discard.
+
+**A genuine, separately-found test fragility, found and fixed:** three
+tests in `tests/test_edge_survey.py` called `survey_live_edges` against
+the real, live committed cache (`refresh_spot=False`, no series override)
+with a captured fixture ladder that closes 2026-10-19 — their own
+docstrings state the assumption plainly: *"this project's own cached spot
+series ends 2026-10-14... this ladder closes 2026-10-19, ~5.8 real days
+out."* Once this run's refresh moved the live cache's last-observed date
+to 2026-10-20 — *past* the fixture ladder's own close time — every one of
+the fixture's 30 markets looked like it had already closed, and
+`survey_live_edges` correctly skipped all 30 as
+"before the last observed spot date," collapsing `len(surveyed)` from the
+tests' expected 30 to 0. **Not a bug in `survey_live_edges`** — it did
+exactly what it's supposed to do with a market that's genuinely in the
+past relative to the data it's given — but a real pre-existing fragility
+in how these three tests pinned their own expected behavior to the live,
+mutable committed cache rather than to a frozen input. Fixed properly,
+not papered over: `survey_live_edges` gained a `series=` parameter
+(mirroring `track_record.resolve_pending_predictions`'s own
+already-established `series=None` escape hatch, for exactly the same
+reason), and the three tests now load a new frozen fixture,
+`tests/fixtures/wti_spot_daily_through_2026-10-14.csv` (a byte-for-byte
+copy of the cache as it stood *before* this run's refresh), via the real
+`fetch_wti_daily` loading path rather than the live cache file — so these
+tests are now permanently robust to any future cache refresh, rather than
+silently re-breaking the next time EIA publishes again. 1 new regression
+test (`test_survey_live_edges_passing_series_never_calls_fetch_wti_daily`)
+confirms `series=` genuinely bypasses `fetch_wti_daily` rather than merely
+overriding its result (134 → 135 tests). Full suite verified: **135/135
+passed**, including the three previously-broken tests now passing against
+the frozen fixture.
+
+**Nothing here was padded or glossed over.** The data revision, the
+basis-trust-gate failure, and the test fragility are all reported exactly
+as found — including the zero-edge sixth snapshot, which stays in the
+persistence history as real data, not quietly dropped for looking like a
+null result. `describe_basis_correction`'s existing, pre-registered
+`stdev <= 1.0` bar was not loosened to force this snapshot's edges to
+count; the honest reading is that the real basis measurement this run is,
+for a documented and traceable reason, less reliable than every prior
+measurement, and the system correctly declined to claim an edge rather
+than report an untrustworthy one.
+
 ## What's next
 
 1. ~~Try `conformal-forecast`'s existing Adaptive Conformal Inference
@@ -1510,13 +1677,37 @@ cell and a best-MAE marker. Full suite verified: **134/134 passed.**
    "looks like noise" — no second flip, no return to "consistent." One
    data point alone doesn't resolve whether `far-OTM` has settled one way
    or is still oscillating; that needs more snapshots over more time.
-   **Remaining real work: keep accumulating snapshots over a longer real
-   window (weeks, not days) to see whether `far-out-of-the-money`'s sign
-   keeps oscillating near zero (consistent with "never a real effect") or
-   resettles one way, whether the larger subsets' magnitude — not just
-   sign — stays stable, and keep watching whether a
+   **Updated (2026-10-21, v0.7.2): a sixth real snapshot recorded zero
+   trustworthy edges in every subset** — a real basis-measurement quality
+   failure (recent-window stdev 3.19, over the pre-registered 1.0 trust
+   bar), traced to a genuine, newly-discovered data-source behavior (EIA
+   revises its own most recent ~2-3 days of preliminary data; see "Real
+   EIA data resumes after a week-plus gap" above), not a code bug. Handled
+   correctly by the existing, unmodified persistence machinery: a
+   zero-data snapshot contributes no sign and doesn't touch any subset's
+   streak count, so every "5/5 real snapshots" verdict above is still
+   accurate (not "6/6" — the sixth snapshot added no scorable data for any
+   subset). **Remaining real work: keep accumulating snapshots over a
+   longer real window (weeks, not days) to see whether
+   `far-out-of-the-money`'s sign keeps oscillating near zero (consistent
+   with "never a real effect") or resettles one way, whether the larger
+   subsets' magnitude — not just sign — stays stable, whether the basis
+   estimate's own trust gate recovers once enough post-revision dates age
+   out of its 10-measurement recent window, and keep watching whether a
    `short-horizon`/`illiquid` market ever actually appears on the live
    ladder.**
+9. ~~Once EIA publishes again, resolve the second pending prediction batch
+   and — since both become available at the same time — take a genuinely
+   non-redundant sixth persistence snapshot in the same run.~~ **Done
+   (2026-10-21, v0.7.2)** — see "Real EIA data resumes after a week-plus
+   gap" above: the second batch resolved (all 3 "exceeded"), a third
+   batch was made, and the sixth snapshot was recorded (see item 8). A
+   real, separate decision surfaced in the same run and is still open,
+   needing Daniel's own call rather than a unilateral pick: whether/when
+   to wire v0.7.0's Transformer-model finding (a real, growing MAE/coverage
+   advantage from horizon 3 onward) into the live `edge.py` pipeline —
+   doing so would change every downstream edge number and the persistence
+   history's own basis.
 
 ## Running it
 
