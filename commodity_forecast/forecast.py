@@ -35,7 +35,7 @@ from forecasting.adaptive import (
 from forecasting.conformal import SplitConformalForecaster, evaluate_coverage
 from forecasting.data import Normalizer, chronological_split, make_windows
 from forecasting.experiment import prepare_split_from_series
-from forecasting.models import DeltaWrapper, LSTMForecaster, NaiveForecaster
+from forecasting.models import DeltaWrapper, LSTMForecaster, NaiveForecaster, TransformerForecaster
 
 
 @dataclass
@@ -431,6 +431,106 @@ def fit_calibrated_naive_forecaster_horizon(
         "n_cal_windows": int(len(X_cal)),
         "lookback": lookback,
         "horizon": horizon,
+    }
+
+    return CalibratedForecastResult(
+        conformal_forecaster=conformal,
+        normalizer_mean=normalizer.mean_,
+        cal_residuals_normalized=cal_residuals_normalized,
+        normalizer_std=normalizer.std_,
+        diagnostics=diagnostics,
+    )
+
+
+MODEL_NAMES = ("naive", "lstm", "transformer")
+
+
+def _build_model(model_name: str, seed: int):
+    """Construct a fresh, untrained model for `fit_calibrated_forecaster_horizon`.
+
+    'naive' returns conformal-forecast's own `NaiveForecaster` directly
+    (no `DeltaWrapper` -- it's already a "tomorrow = today" delta model in
+    effect, and wrapping it again would double-apply the same identity).
+    'lstm'/'transformer' return conformal-forecast's own from-scratch
+    PyTorch models, `DeltaWrapper`-wrapped with the same discipline that
+    library's own benchmark uses throughout (predict the *change* from the
+    last observed value, not the absolute level -- see `DeltaWrapper`'s own
+    docstring for why this matters for a trending series).
+    """
+    if model_name == "naive":
+        return NaiveForecaster()
+    if model_name == "lstm":
+        return DeltaWrapper(LSTMForecaster(hidden_size=32, num_layers=1, seed=seed))
+    if model_name == "transformer":
+        return DeltaWrapper(TransformerForecaster(seed=seed))
+    raise ValueError(f"Unknown model_name {model_name!r}; must be one of {MODEL_NAMES}")
+
+
+def fit_calibrated_forecaster_horizon(
+    series_values: np.ndarray,
+    horizon: int,
+    model_name: str = "naive",
+    lookback: int = 5,
+    alpha: float = 0.1,
+    seed: int = 0,
+) -> CalibratedForecastResult:
+    """Generalizes `fit_calibrated_naive_forecaster_horizon` to any of
+    `MODEL_NAMES`, instead of always `NaiveForecaster`.
+
+    Added to answer this project's own README "What's next" item 7's
+    still-open candidate: "worth re-trying conformal-forecast's own
+    LSTM/Transformer/N-BEATS model families at this horizon specifically,
+    not just at horizon=1 as already checked" -- every prior
+    stronger-point-model comparison in this project (`forecast.py`'s
+    earlier one-horizon LSTM check, see the README's "Does a stronger
+    point model help?" section) only ever ran at `horizon=1`, the one
+    this project has since found is not what real, live Kalshi markets
+    actually need (see the Horizon-caveat resolution above).
+
+    Deliberately does NOT replace `fit_calibrated_naive_forecaster_horizon`
+    (every existing caller -- `edge.py`, `edge_survey.py`, and this
+    project's own tests -- keeps using the unchanged naive-only function,
+    same "don't touch what's already shipped and depended on" discipline
+    `prepare_horizon_split`'s own docstring already follows for
+    conformal-forecast itself). `model_name="naive"` here is confirmed,
+    not just assumed, to produce byte-identical results to that function
+    (same split, same model construction, same everything) -- see
+    `tests/test_horizon_model_comparison.py`.
+    """
+    if model_name not in MODEL_NAMES:
+        raise ValueError(f"Unknown model_name {model_name!r}; must be one of {MODEL_NAMES}")
+
+    (
+        X_train,
+        y_train,
+        X_cal,
+        y_cal,
+        X_test,
+        y_test,
+        normalizer,
+    ) = prepare_horizon_split(series_values, horizon=horizon, lookback=lookback)
+
+    model = _build_model(model_name, seed=seed)
+    conformal = SplitConformalForecaster(model=model, alpha=alpha)
+    conformal.fit(X_train, y_train, X_cal, y_cal)
+
+    prediction = conformal.predict(X_test)
+    coverage = evaluate_coverage(prediction, y_test)
+
+    point_denorm = normalizer.inverse_transform(prediction.point)
+    y_test_denorm = normalizer.inverse_transform(y_test)
+    mae_usd = float(np.mean(np.abs(point_denorm - y_test_denorm)))
+
+    cal_residuals_normalized = (y_cal - conformal.model.predict(X_cal)).reshape(-1)
+
+    diagnostics = {
+        **coverage,
+        "mae_usd_per_bbl": mae_usd,
+        "n_train_windows": int(len(X_train)),
+        "n_cal_windows": int(len(X_cal)),
+        "lookback": lookback,
+        "horizon": horizon,
+        "model_name": model_name,
     }
 
     return CalibratedForecastResult(
