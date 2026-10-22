@@ -155,7 +155,16 @@ def test_survey_live_edges_scores_the_real_captured_open_ladder(monkeypatch):
     basis correction, compute_edge) against a real, captured, currently-
     open KXWTI ladder (2026-10-16) and a real settlement-history fixture
     for the basis estimate -- only the live network calls are replaced,
-    never the scoring logic itself."""
+    never the scoring logic itself.
+
+    Pins `model_name="naive"` (v0.8.0): this test's assertions (horizon
+    picked, liquidity caveat, count skipped) are all independent of which
+    point model was fit, but pinning the pre-0.8.0 default here keeps this
+    test's own intent -- a frozen-fixture regression check -- honest and
+    decoupled from `survey_live_edges`'s own live default, which changed
+    to `"transformer"` this version. See
+    `test_survey_live_edges_defaults_to_the_transformer_model` below for a
+    dedicated check of the new default itself."""
     open_quotes = _load_open_ladder_quotes()
     settlement_quotes = _load_settlement_history_quotes()
 
@@ -165,7 +174,7 @@ def test_survey_live_edges_scores_the_real_captured_open_ladder(monkeypatch):
         lambda *a, **kw: bracket_settlements(settlement_quotes),
     )
 
-    surveyed, skipped = survey_live_edges(series=_frozen_spot_series_through_2026_10_14())
+    surveyed, skipped = survey_live_edges(series=_frozen_spot_series_through_2026_10_14(), model_name="naive")
 
     # All 30 real markets in this fixture are "greater than $X" questions
     # closing on a real, validatable horizon (this project's own cached
@@ -217,7 +226,7 @@ def test_survey_live_edges_skips_a_market_with_an_unsupported_strike_type(monkey
         lambda *a, **kw: bracket_settlements(settlement_quotes),
     )
 
-    surveyed, skipped = survey_live_edges(series=_frozen_spot_series_through_2026_10_14())
+    surveyed, skipped = survey_live_edges(series=_frozen_spot_series_through_2026_10_14(), model_name="naive")
     assert len(surveyed) == 30
     assert len(skipped) == 1
     assert "KXWTI-TEST-RANGE" in skipped[0]
@@ -252,7 +261,7 @@ def test_survey_live_edges_skips_a_market_beyond_every_validated_horizon(monkeyp
         lambda *a, **kw: bracket_settlements(settlement_quotes),
     )
 
-    surveyed, skipped = survey_live_edges(series=_frozen_spot_series_through_2026_10_14())
+    surveyed, skipped = survey_live_edges(series=_frozen_spot_series_through_2026_10_14(), model_name="naive")
     assert len(surveyed) == 30
     assert len(skipped) == 1
     assert "KXWTI-TEST-FAROUT" in skipped[0]
@@ -279,6 +288,85 @@ def test_survey_live_edges_passing_series_never_calls_fetch_wti_daily(monkeypatc
     )
     monkeypatch.setattr("commodity_forecast.edge_survey.fetch_wti_daily", _must_not_be_called)
 
-    surveyed, skipped = survey_live_edges(series=_frozen_spot_series_through_2026_10_14())
+    surveyed, skipped = survey_live_edges(series=_frozen_spot_series_through_2026_10_14(), model_name="naive")
     assert skipped == []
     assert len(surveyed) == 30
+
+
+# --- v0.8.0: the live default switched from always-naive to "transformer" ---
+
+
+def test_survey_live_edges_rejects_unknown_model_name():
+    """`model_name` is validated up front, the same discipline
+    `forecast.fit_calibrated_forecaster_horizon` already uses for the same
+    parameter -- a typo here should fail loudly, immediately, not after a
+    real (possibly slow) model fit is already underway."""
+    with pytest.raises(ValueError, match="model_name"):
+        survey_live_edges(series=_frozen_spot_series_through_2026_10_14(), model_name="bogus")
+
+
+def test_survey_live_edges_defaults_to_the_transformer_model(monkeypatch):
+    """Direct regression guard for the v0.8.0 default change: calling
+    `survey_live_edges` with no `model_name` argument at all must fit the
+    `"transformer"` model, not silently keep the old always-naive
+    behavior. Spies on the real `fit_calibrated_forecaster_horizon` call
+    (rather than asserting on output numbers, which are independent of the
+    model for this fixture's caveats) to check the exact `model_name` it
+    was actually called with."""
+    open_quotes = _load_open_ladder_quotes()
+    settlement_quotes = _load_settlement_history_quotes()
+    seen_model_names = []
+
+    import commodity_forecast.edge_survey as edge_survey_module
+
+    real_fit = edge_survey_module.fit_calibrated_forecaster_horizon
+
+    def _spy(*args, **kwargs):
+        seen_model_names.append(kwargs.get("model_name"))
+        return real_fit(*args, **kwargs)
+
+    monkeypatch.setattr("commodity_forecast.edge_survey.fetch_markets", lambda *a, **kw: open_quotes)
+    monkeypatch.setattr(
+        "commodity_forecast.edge_survey.fetch_settlement_brackets",
+        lambda *a, **kw: bracket_settlements(settlement_quotes),
+    )
+    monkeypatch.setattr("commodity_forecast.edge_survey.fit_calibrated_forecaster_horizon", _spy)
+
+    surveyed, skipped = survey_live_edges(series=_frozen_spot_series_through_2026_10_14())
+
+    assert skipped == []
+    assert len(surveyed) == 30
+    # Exactly one real fit (one distinct horizon across this fixture's 30
+    # markets -- see the horizon=10 assertion above), and it used the new
+    # default.
+    assert seen_model_names == ["transformer"]
+
+
+def test_survey_live_edges_naive_and_transformer_give_real_different_probabilities(monkeypatch):
+    """Confirms the model switch is real, not a silent no-op: running the
+    same real fixture ladder through `model_name="naive"` vs. the new
+    `model_name="transformer"` default must produce at least one real,
+    different `our_probability` -- the same kind of direct regression
+    guard `test_horizon_model_comparison.py`'s own
+    `test_lstm_and_transformer_produce_real_different_predictions_than_naive`
+    already uses for `fit_calibrated_forecaster_horizon` directly."""
+    open_quotes = _load_open_ladder_quotes()
+    settlement_quotes = _load_settlement_history_quotes()
+
+    monkeypatch.setattr("commodity_forecast.edge_survey.fetch_markets", lambda *a, **kw: open_quotes)
+    monkeypatch.setattr(
+        "commodity_forecast.edge_survey.fetch_settlement_brackets",
+        lambda *a, **kw: bracket_settlements(settlement_quotes),
+    )
+
+    naive_surveyed, _ = survey_live_edges(
+        series=_frozen_spot_series_through_2026_10_14(), model_name="naive"
+    )
+    transformer_surveyed, _ = survey_live_edges(
+        series=_frozen_spot_series_through_2026_10_14(), model_name="transformer"
+    )
+
+    naive_probs = [s.estimate.our_probability for s in naive_surveyed]
+    transformer_probs = [s.estimate.our_probability for s in transformer_surveyed]
+    assert len(naive_probs) == len(transformer_probs) == 30
+    assert naive_probs != transformer_probs
