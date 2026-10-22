@@ -243,3 +243,40 @@ def test_kalshi_market_quote_defaults_cap_strike_to_none_for_existing_call_sites
         result="",
     )
     assert quote.cap_strike is None
+
+
+def test_parse_market_captures_expiration_value_for_a_real_settled_crude_storage_market():
+    """v0.11.0: `expiration_value` (added for the real `KXEIACRUDEW` crude-
+    storage family) against a real captured settled response (tests/
+    fixtures/kxeiacrudew_markets_settled_live_2026-10-22.json, a byte-for-
+    byte real API capture, same discipline as the existing `KXWTI`/
+    `KXHIGHNY` fixture tests above)."""
+    raw = _load_fixture("kxeiacrudew_markets_settled_live_2026-10-22.json")
+    quotes = {m["ticker"]: _parse_market(m) for m in raw["markets"]}
+
+    q = quotes["KXEIACRUDEW-26OCT21-T422"]
+    assert q.expiration_value == "412.5M"
+    assert q.result == "no"
+
+
+def test_kalshi_market_quote_defaults_expiration_value_to_none_for_existing_call_sites():
+    """Every pre-v0.11.0 call site (every WTI/temperature test or fixture)
+    constructs `KalshiMarketQuote` without `expiration_value` -- confirms
+    the new field's default keeps those unaffected."""
+    quote = KalshiMarketQuote(
+        ticker="T",
+        event_ticker="E",
+        title="t",
+        status="active",
+        strike_type="greater",
+        floor_strike=100.0,
+        close_time="2026-11-01T00:00:00Z",
+        yes_bid=0.4,
+        yes_ask=0.6,
+        no_bid=0.4,
+        no_ask=0.6,
+        volume=0.0,
+        open_interest=0.0,
+        result="",
+    )
+    assert quote.expiration_value is None
