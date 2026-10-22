@@ -118,11 +118,27 @@ commodity_forecast/
                    live KXEIACRUDEW weekly EIA crude-storage ladder
                    against Kalshi's own direct `expiration_value`
                    settlement field -- see "The crude storage family"
-                   below
+                   below. (v0.12.0) temperature.py's TemperatureMarketFamily
+                   now also serves KXHIGHMIA (Miami), its own real,
+                   independently-measured second station -- see "A
+                   second temperature station" below. Also v0.12.0: a
+                   real cache-isolation bug fixed (`__init__` now
+                   forwards `cache_path`, defaulting per-station via
+                   `temperature_data.default_cache_path_for_station`
+                   rather than one hardcoded NYC path) and a real
+                   station-label bug fixed (`describe_temperature_basis_correction`'s
+                   note text no longer always says "NYC")
   temperature_data.py (new, v0.10.0) real historical NYC daily-max-
                    temperature data from Open-Meteo's free, public
                    archive API, cached locally the same way data.py
-                   caches EIA spot prices
+                   caches EIA spot prices. (v0.12.0) gained
+                   MIAMI_LATITUDE/MIAMI_LONGITUDE, a `timezone` parameter
+                   on the real fetch path (previously hardcoded to US
+                   Eastern regardless of station -- harmless for
+                   NYC/Miami, a real latent bug for a future
+                   Pacific-timezone station), and
+                   default_cache_path_for_station (one real cache file
+                   per station, never shared)
   crude_storage_data.py (new, v0.11.0) real historical EIA weekly U.S.
                    crude-oil-in-storage data (EIA series `WCESTUS1`),
                    fetched directly from EIA's own spreadsheet download,
@@ -252,6 +268,13 @@ tests/
                         result), frozen-series exact-probability tests,
                         and a real live end-to-end integration test
                         against the actual `KXEIACRUDEW` ladder
+  test_markets_temperature.py (v0.12.0) 6 new tests for the Miami
+                        addition: a direct regression test spying on the
+                        real `cache_path` value passed per station (the
+                        cache-isolation bug's own regression test), an
+                        explicit-override test, a real live end-to-end
+                        integration test against the actual `KXHIGHMIA`
+                        ladder, and two tests for the station-label fix
 data/
   wti_spot_daily.csv real cached WTI daily spot price series, 1986-01-02 to
                      present. Never hand-edited -- a refresh overwrites it
@@ -274,9 +297,31 @@ data/
                      separate file so the two model series are never
                      conflated into one misleading persistence count; see
                      "Switching the live pipeline to the Transformer point
-                     model" below. Two real entries as of v0.9.0, both
+                     model" below. Four real entries as of v0.12.0, all
                      honest n=0 (the basis-trust gate failing both times
                      for the same model-independent reason)
+  nyc_temp_daily.csv (new, v0.10.0) real cached Open-Meteo daily-max
+                     temperature series for NYC (Central Park
+                     coordinates), 2006-01-01 to present (degF). Never
+                     hand-edited -- a refresh overwrites it with the real
+                     series as of that moment
+  edge_subset_history_temperature.jsonl (new, v0.10.0) the real,
+                     append-only snapshot history for the NYC temperature
+                     family -- same discipline as every other family's
+                     history file. Three real entries as of v0.12.0, all
+                     honest n=0 (the basis-trust gate failing every time
+                     so far)
+  miami_temp_daily.csv (new, v0.12.0) real cached Open-Meteo daily-max
+                     temperature series for Miami (Miami International
+                     Airport coordinates, `CLIMIA`'s real physical area),
+                     2006-01-01 to present (degF) -- this project's second
+                     station, kept in its own file per the real
+                     cache-isolation bug fix described in "A second
+                     temperature station" above, never sharing NYC's cache
+  edge_subset_history_temperature_miami.jsonl (new, v0.12.0) the first
+                     real snapshot history for the Miami temperature
+                     family -- one real entry as of v0.12.0 (12 real
+                     markets scored, 0 skipped, basis not yet trusted)
   crude_storage_weekly.csv (new, v0.11.0) real cached EIA WCESTUS1 weekly
                      U.S. crude-oil-in-storage series, 1983-06-10 to
                      present (million barrels). Never hand-edited -- a
@@ -286,7 +331,7 @@ data/
                      snapshot history for the crude-storage family -- one
                      real JSON line per real survey run, same append-only
                      discipline as the other two families' history files.
-                     One real entry as of v0.11.0 (too few snapshots yet
+                     Two real entries as of v0.12.0 (still too few snapshots yet
                      for a persistence verdict)
 predictions/
   README.md         explains the forward track record's format and resolution rule
@@ -2020,6 +2065,95 @@ field (real captured fixture,
 `tests/fixtures/kxeiacrudew_markets_settled_live_2026-10-22.json`).
 **Verified 210/210 passed.**
 
+## A second temperature station: Miami, a real cache-isolation bug fix, and closing out the natural-gas idea (v0.12.0, 2026-10-22)
+
+v0.10.0's own "What's next" named the temperature family's other real,
+confirmed-open stations (`KXHIGHCHI`, `KXHIGHLAX`, `KXHIGHAUS`,
+`KXHIGHMIA`) as worth trying once `KXHIGHNY` had a few more real
+snapshots, to see whether its basis/calibration findings were NYC-specific
+or general. A real live check this run found `KXHIGHCHI` and `KXHIGHAUS`
+have zero real open markets right now, and `KXHIGHLAX` — despite 12 real
+open markets — has zero real settled `"between"` brackets at all, so no
+basis could honestly be measured against it. `KXHIGHMIA` (Miami) does
+have real settled history (132+ real `"between"` brackets on the first
+live page alone), so it's the real second station built here.
+
+**A real, disclosed bug found and fixed while adding it.**
+`TemperatureMarketFamily.__init__` never forwarded its own `cache_path`
+argument to `fetch_nyc_temp_daily`, so *every* station built with this
+class — not just NYC — would have silently read and written the one
+hardcoded `data/nyc_temp_daily.csv` file. This was never hit before
+because NYC was the only station this project had ever instantiated, but
+it would have silently corrupted a second station's cached temperature
+series with NYC's own readings the moment one was built — exactly the
+kind of bug that is cheap to introduce and easy to miss precisely because
+the existing single-station tests can't catch it. Fixed by giving each
+station its own real default cache path
+(`temperature_data.default_cache_path_for_station`, keyed by series
+ticker — `"nyc_temp_daily.csv"` / `"miami_temp_daily.csv"`), confirmed via
+a new regression test that spies on the real `cache_path` value passed
+for two different stations and asserts they differ. A second, smaller
+instance of the same class of bug was found and fixed alongside it:
+`describe_temperature_basis_correction`'s own note text said `"NYC"`
+unconditionally, so a Miami family's real basis note would have
+misleadingly said "same real NYC location" even while reporting Miami's
+own real numbers — fixed with a `station_label` parameter (defaulting to
+`"NYC"` for backward compatibility), with a test confirming Miami's own
+real basis note actually says "Miami."
+
+**The real, honest measured results for Miami — a real *different*
+finding, not a confirmation of NYC's:**
+- The real Weather-Company-vs-Open-Meteo basis correction (10 real paired
+  observations, the same `window=10` recency rule used for every other
+  family): mean **+1.63 degF**, stdev **1.56 degF** — fails the project's
+  own `stdev<=1.0` trust bar, and by a wider margin than NYC's own
+  near-miss (1.14 degF). Reported exactly as measured; the bar was not
+  loosened, and the worse real number was not hidden or softened.
+- The real leave-one-year-out climatology backtest (same method as NYC,
+  `window_days=7`): **78.4%** measured coverage at an 80% target, **88.3%**
+  at a 90% target, across **1,086** real evaluations — close to nominal,
+  slightly *under*-covering both targets (NYC's own backtest slightly
+  *over*-covered at 80.9%/89.6%). A real, honest case-dependent result,
+  not a clean repeat.
+- The first real live snapshot against the real, open `KXHIGHMIA` ladder
+  scored all **12** real open markets successfully (0 skipped). Because
+  the basis correction isn't trusted, the `trustworthy_only=True` subset
+  summary honestly comes back `n=0` for every subset — the same honest
+  default every other family's first untrusted snapshot has shown.
+  Recorded as this family's first entry in the new
+  `data/edge_subset_history_temperature_miami.jsonl` (its own file,
+  tracked separately from NYC's, same discipline as every other family
+  here).
+
+**Closing out item 12(e)'s natural-gas idea, honestly, rather than
+leaving it open indefinitely.** A real live scan of all 15,356 series
+Kalshi's public API currently lists (keyword-matched on "natural gas" /
+"natgas" / "gas storage" / "eia") found exactly one real candidate whose
+name plausibly matched "EIA weekly natural-gas storage":
+`KXNATGASW` ("Natural Gas Weekly"). Its real `rules_primary` text settles
+it directly: *"If the close price of the 1-minute candlestick for natural
+gas on [date] at 5:00 PM EDT is above X USD/MMBtu..."* — a live *price*
+market (settlement source: Pyth's `NATGAS` price index), not an EIA
+storage-report market. There is currently no real Kalshi market family
+matching this project's own backlog item — not built, because building
+one would mean scoring against a market that doesn't exist, the opposite
+of this project's honesty discipline. Closed here rather than carried
+forward indefinitely; a future run should re-check periodically rather
+than assume this is permanent, since Kalshi lists new series over time.
+
+**Tests: 6 new (210 → 216).** `test_default_cache_path_differs_per_station`,
+`test_family_uses_its_own_default_cache_path_not_a_shared_one` (a spy
+confirming two different real `cache_path` values are actually used for
+two stations — the direct regression test for the cache bug),
+`test_family_accepts_an_explicit_cache_path_override`,
+`test_family_real_live_kxhighmia_end_to_end` (a real, live integration
+test against the actual `KXHIGHMIA` series and the real Open-Meteo
+archive for Miami's own real coordinates),
+`test_describe_temperature_basis_correction_defaults_to_nyc_but_accepts_another_station`,
+and `test_family_passes_the_real_station_label_for_its_own_basis_note`
+(the regression test for the station-label bug). **Verified 216/216
+passed.**
+
 ## What's next
 
 1. ~~Try `conformal-forecast`'s existing Adaptive Conformal Inference
@@ -2269,11 +2403,13 @@ field (real captured fixture,
     re-measuring the real Weather-Company-vs-Open-Meteo basis as more real
     settled brackets accumulate — the current stdev (1.14 degF) sits close
     enough to the 1.0 bar that more real data could honestly resolve it
-    either way, not just confirm the current miss; (c) consider a second
+    either way, not just confirm the current miss; ~~(c) consider a second
     real station (`KXHIGHCHI`, `KXHIGHLAX`, `KXHIGHAUS`, `KXHIGHMIA` are
     all real, currently open) once `KXHIGHNY` itself has a few more real
     snapshots, to see whether the basis/calibration findings are
-    NYC-specific or general; ~~(d) the EIA-weekly-storage family remains
+    NYC-specific or general~~ **Done (v0.12.0, 2026-10-22)** — see item 13
+    below (Miami, a real but *different* finding, not a confirmation);
+    ~~(d) the EIA-weekly-storage family remains
     the next genuinely *new* market family to build, after the
     temperature family has had a chance to accumulate real persistence
     data rather than being abandoned after one snapshot.~~ **Done
@@ -2306,6 +2442,28 @@ field (real captured fixture,
     persistence data: EIA also publishes weekly natural-gas storage
     (`WNGSUS2`-style data) — a plausible fourth market family, not started
     this run, kept here as an idea rather than acted on prematurely.
+13. **(New, v0.12.0) A second temperature station (Miami, `KXHIGHMIA`) —
+    a real, different finding, not a confirmation; a real cache-isolation
+    bug found and fixed along the way; and a real, honest closing of the
+    "EIA weekly natural-gas storage" idea from item 12(e) above.** See
+    "A second temperature station: Miami" below for the full account.
+    Concretely, what's left here: (a) keep accumulating real
+    `edge_subset_history_temperature_miami.jsonl` snapshots the same way
+    as every other family, toward a real persistence verdict; (b)
+    `KXHIGHCHI`/`KXHIGHAUS` had zero real open markets and `KXHIGHLAX` had
+    zero real settled history when checked this run — worth a fresh check
+    on a future run rather than assumed permanently unavailable, since a
+    real market's listing status can change; (c) item 12(e)'s natural-gas
+    idea is now closed, not just deferred: a real live scan of all 15,356
+    Kalshi series found `KXNATGASW` ("Natural Gas Weekly"), the only real
+    candidate matching "natural gas" + "weekly", but its real
+    `rules_primary` text confirms it settles against a live price index
+    (Pyth's `NATGAS` price feed), not an EIA storage report — there is no
+    real Kalshi market family today matching the "EIA weekly natural-gas
+    storage" premise this project's own backlog named. Not built, because
+    it would not be real (no matching market exists to score against); a
+    future run should re-check rather than assume this is permanent, since
+    Kalshi lists new series over time.
 
 ## Running it
 
