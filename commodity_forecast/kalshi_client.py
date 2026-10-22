@@ -93,6 +93,16 @@ class KalshiMarketQuote:
     # only), "between" (both) -- confirmed directly against the live API. Defaults to `None`
     # so every existing call site/fixture that never set it (every WTI test and the WTI family
     # itself) is unaffected.
+    expiration_value: str | None = None
+    # ^ added v0.11.0, for `markets/crude_storage.py`'s real `KXEIACRUDEW` family -- on a real,
+    # finalized market, Kalshi's own API directly reports the real settled underlying value as
+    # a plain string (e.g. `"412.5M"`), not just which side of this one strike it fell on. This
+    # is a more direct, exact real measurement of a family's true settlement value than either
+    # WTI's bracket-reconstruction method or temperature's settled-"between"-bracket method --
+    # confirmed present on every real finalized `KXEIACRUDEW` market checked, always identical
+    # across every strike in the same real settlement event (as expected, since every strike in
+    # one ladder is a question about the same one real underlying value). Defaults to `None` so
+    # every existing call site/fixture that never set it is unaffected.
 
     @property
     def is_actively_traded(self) -> bool:
@@ -127,6 +137,7 @@ def _parse_market(raw: dict) -> KalshiMarketQuote:
         volume=float(raw.get("volume_fp", 0.0)),
         open_interest=float(raw.get("open_interest_fp", 0.0)),
         result=raw.get("result", ""),
+        expiration_value=raw.get("expiration_value"),
     )
 
 
