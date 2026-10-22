@@ -57,18 +57,41 @@ from __future__ import annotations
 import datetime as _dt
 import re
 from dataclasses import dataclass
+from pathlib import Path
 
 from commodity_forecast.benchmark import BasisMeasurement, basis_adjusted_strike, recent_basis_estimate
 from commodity_forecast.edge import days_to_close_from_last_observation
 from commodity_forecast.kalshi_client import KalshiMarketQuote, fetch_markets
 from commodity_forecast.markets.base import MarketFamily, MarketNotScorable, ProbabilityEstimate
-from commodity_forecast.temperature_data import NYC_LATITUDE, NYC_LONGITUDE, fetch_nyc_temp_daily
+from commodity_forecast.temperature_data import (
+    EASTERN_TIMEZONE,
+    NYC_LATITUDE,
+    NYC_LONGITUDE,
+    default_cache_path_for_station,
+    fetch_nyc_temp_daily,
+)
+
+#: Re-exported here so a caller building a `TemperatureMarketFamily` for
+#: the second station doesn't need to separately import from
+#: `temperature_data` -- `MarketFamily` construction sites naturally
+#: import from this module already.
+from commodity_forecast.temperature_data import MIAMI_LATITUDE, MIAMI_LONGITUDE  # noqa: F401
 
 _MONTHS = {
     "JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
     "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12,
 }
 _TICKER_DATE_RE = re.compile(r"^[A-Z]+-(?P<yy>\d{2})(?P<mon>[A-Z]{3})(?P<dd>\d{2})-")
+
+#: Real, human-readable station labels for `describe_temperature_basis_correction`'s
+#: own note text -- keyed by series ticker so each station's own real
+#: basis note says which real station it actually measured, never a
+#: hardcoded "NYC" regardless of which station was built (the real bug
+#: fixed alongside this run's Miami addition).
+_STATION_LABELS = {
+    "KXHIGHNY": "NYC",
+    "KXHIGHMIA": "Miami",
+}
 
 
 def parse_ticker_settlement_date(ticker: str) -> str | None:
@@ -169,7 +192,12 @@ def measure_temperature_basis(
 
 
 def describe_temperature_basis_correction(
-    mean: float, stdev: float, n: int, max_stdev_for_trust: float = 1.0, min_n_for_trust: int = 5
+    mean: float,
+    stdev: float,
+    n: int,
+    max_stdev_for_trust: float = 1.0,
+    min_n_for_trust: int = 5,
+    station_label: str = "NYC",
 ) -> tuple[bool, str]:
     """The temperature-family equivalent of `benchmark.describe_basis_correction`,
     with real, correct units/wording (degF, Open-Meteo vs. The Weather
@@ -178,12 +206,20 @@ def describe_temperature_basis_correction(
     wrong real data sources). Same trust-bar defaults as WTI's own
     (`stdev <= 1.0`, `n >= 5`) for a consistent, not-loosened-to-force-a-
     pass real bar across every family in this project.
+
+    `station_label` defaults to `"NYC"` for backward compatibility (every
+    caller before the 2026-10-22 Miami addition implicitly meant NYC and
+    never passed one) -- the real bug this fixes: before `station_label`
+    existed, this note's text always said "NYC" verbatim even when called
+    for a different real station (Miami), which would have silently
+    mislabeled Miami's own real measured basis note. `TemperatureMarketFamily.__init__`
+    now passes the real station name it was actually built for.
     """
     trustworthy = n >= min_n_for_trust and stdev <= max_stdev_for_trust
     note = (
         f"temperature settlement-benchmark basis measured from {n} real paired observations "
         f"(real settled Weather Company bracket midpoint vs. this project's own Open-Meteo "
-        f"archive reading, same real NYC location): mean {mean:+.2f} degF, stdev {stdev:.2f} degF "
+        f"archive reading, same real {station_label} location): mean {mean:+.2f} degF, stdev {stdev:.2f} degF "
         f"-- {'tight and well-supported enough to trust' if trustworthy else 'NOT trusted (too much spread for the same pre-registered bar WTI uses)'}"
     )
     return trustworthy, note
@@ -341,6 +377,33 @@ class TemperatureMarketFamily(MarketFamily):
     work (fetching/caching the real historical series, measuring the real
     basis against real settled brackets) happens once in `__init__`, same
     pattern as `WTIMarketFamily`.
+
+    ## Second station: Miami (`KXHIGHMIA`), added 2026-10-22
+
+    v0.10.0's own "What's next" named the other confirmed-real, currently-
+    open `KXHIGH<STATION>` series (`KXHIGHCHI`/`KXHIGHLAX`/`KXHIGHAUS`/
+    `KXHIGHMIA`) as worth considering once NYC had more history. A real
+    live check this run found `KXHIGHCHI`/`KXHIGHAUS` have no real open
+    markets right now, and `KXHIGHLAX` has zero real settled history (no
+    `"between"` brackets at all yet) -- not enough real data to measure a
+    basis against. `KXHIGHMIA` does have real settled history (132+ real
+    `"between"` brackets found on the first live page alone), so it's the
+    real second station built here; its own real basis/climatology
+    results are measured and reported independently of NYC's, not averaged
+    together or assumed to behave the same way.
+
+    **A real, disclosed bug found and fixed while adding this:**
+    `__init__` previously called `fetch_nyc_temp_daily` without ever
+    forwarding its own `cache_path` argument, so *any* station built with
+    this class -- not just NYC -- would have silently read and written
+    `data/nyc_temp_daily.csv`. This was never hit before because NYC was
+    the only station ever instantiated, but it would have silently
+    corrupted a second station's own cached series with NYC's temperature
+    readings (or vice versa) the moment one was built. Fixed by defaulting
+    `cache_path` to `temperature_data.default_cache_path_for_station(series_ticker)`
+    (`"nyc_temp_daily.csv"` for `KXHIGHNY`, unchanged from before --
+    `"miami_temp_daily.csv"` for `KXHIGHMIA`, new) rather than always
+    reaching for the one hardcoded NYC path.
     """
 
     def __init__(
@@ -348,12 +411,14 @@ class TemperatureMarketFamily(MarketFamily):
         series_ticker: str = "KXHIGHNY",
         latitude: float = NYC_LATITUDE,
         longitude: float = NYC_LONGITUDE,
+        timezone: str = EASTERN_TIMEZONE,
         climatology_start_date: str = "2006-01-01",
         climatology_end_date: str | None = None,
         window_days: int = 7,
         refresh: bool = False,
         series: dict[str, float] | None = None,
         max_basis_events: int = 40,
+        cache_path: "Path | str | None" = None,
     ) -> None:
         self.series_ticker = series_ticker
         self.latitude = latitude
@@ -363,13 +428,18 @@ class TemperatureMarketFamily(MarketFamily):
         if climatology_end_date is None:
             climatology_end_date = (_dt.date.today() - _dt.timedelta(days=2)).isoformat()
 
+        if cache_path is None:
+            cache_path = default_cache_path_for_station(series_ticker)
+
         self._series = fetch_nyc_temp_daily(
             climatology_start_date,
             climatology_end_date,
             refresh=refresh,
             series=series,
+            cache_path=cache_path,
             latitude=latitude,
             longitude=longitude,
+            timezone=timezone,
         )
         self._last_observed_date = max(self._series)
         self._last_observed_value = self._series[self._last_observed_date]
@@ -377,10 +447,11 @@ class TemperatureMarketFamily(MarketFamily):
         brackets = fetch_real_settled_brackets(series_ticker)
         measurements = measure_temperature_basis(brackets, self._series)
         basis_est = recent_temperature_basis_estimate(measurements)
+        station_label = _STATION_LABELS.get(series_ticker, series_ticker)
         if basis_est is not None:
             self._basis_mean, basis_stdev, basis_n = basis_est
             self._basis_trustworthy, self._basis_note = describe_temperature_basis_correction(
-                self._basis_mean, basis_stdev, basis_n
+                self._basis_mean, basis_stdev, basis_n, station_label=station_label
             )
         else:
             self._basis_mean, self._basis_trustworthy = 0.0, False

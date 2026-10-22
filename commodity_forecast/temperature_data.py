@@ -62,6 +62,44 @@ DEFAULT_NYC_CACHE_PATH = DATA_DIR / "nyc_temp_daily.csv"
 NYC_LATITUDE = 40.7829
 NYC_LONGITUDE = -73.9654
 
+#: Real public coordinates for Miami International Airport, the real
+#: physical area `KXHIGHMIA`'s own real settlement station (CLIMIA) --
+#: confirmed via a real market's own `rules_primary` text, same discipline
+#: used to confirm NYC's CLINYC above (see `markets/temperature.py`'s
+#: 2026-10-22 second-station addition for the full account of why Miami).
+MIAMI_LATITUDE = 25.7959
+MIAMI_LONGITUDE = -80.2870
+
+#: Real local timezone each station's Open-Meteo query uses to bucket a
+#: "daily" high (both the stations added so far share US Eastern -- see
+#: the `timezone` parameter below for why this exists rather than being
+#: hardcoded forever).
+EASTERN_TIMEZONE = "America/New_York"
+
+#: A real per-station default cache filename, keyed by `KXHIGH<STATION>`
+#: series ticker -- deliberately NOT a single shared default, so that
+#: adding a second station can never silently read/write the first
+#: station's own cached series under its name (see the 2026-10-22 fix
+#: note in `markets/temperature.py`'s module docstring for the real,
+#: disclosed bug this closes: `TemperatureMarketFamily.__init__` never
+#: forwarded its own `cache_path` through to this function before that
+#: fix, so every station would have silently shared NYC's cache file).
+_STATION_CACHE_SLUGS = {
+    "KXHIGHNY": "nyc",
+    "KXHIGHMIA": "miami",
+}
+
+
+def default_cache_path_for_station(series_ticker: str) -> Path:
+    """The real default local cache path for a given `KXHIGH<STATION>`
+    series ticker -- `"nyc_temp_daily.csv"` / `"miami_temp_daily.csv"` for
+    the two stations this project has built so far, or a lowercased
+    ticker-derived filename for any future station not yet in
+    `_STATION_CACHE_SLUGS` (still unique per ticker, just less pretty)."""
+    slug = _STATION_CACHE_SLUGS.get(series_ticker, series_ticker.lower())
+    return DATA_DIR / f"{slug}_temp_daily.csv"
+
+
 OPEN_METEO_ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
 
 
@@ -75,6 +113,7 @@ def _fetch_open_meteo_range(
     end_date: str,
     latitude: float,
     longitude: float,
+    timezone: str = EASTERN_TIMEZONE,
     timeout: float = 30.0,
     max_retries: int = 5,
     initial_backoff: float = 3.0,
@@ -85,6 +124,15 @@ def _fetch_open_meteo_range(
     while building this, same real rate-limiting behavior
     `kalshi_client.py` already documents for Kalshi's own API) with
     exponential backoff.
+
+    `timezone`: the real local timezone Open-Meteo uses to bucket each
+    "daily" high -- previously hardcoded to `EASTERN_TIMEZONE` regardless
+    of which station was being queried (harmless for NYC/Miami, both real
+    Eastern-timezone stations, but a real latent bug for any future
+    Pacific-timezone station like `KXHIGHLAX`, where it would silently
+    shift every daily boundary by 3 hours). Now parameterized, defaulting
+    to the same value as before so NYC/Miami's own real cached results
+    are unaffected.
     """
     params = {
         "latitude": latitude,
@@ -93,7 +141,7 @@ def _fetch_open_meteo_range(
         "end_date": end_date,
         "daily": "temperature_2m_max",
         "temperature_unit": "fahrenheit",
-        "timezone": "America/New_York",
+        "timezone": timezone,
     }
     url = f"{OPEN_METEO_ARCHIVE_URL}?{urllib.parse.urlencode(params)}"
 
@@ -148,8 +196,13 @@ def fetch_nyc_temp_daily(
     cache_path: Path | str = DEFAULT_NYC_CACHE_PATH,
     latitude: float = NYC_LATITUDE,
     longitude: float = NYC_LONGITUDE,
+    timezone: str = EASTERN_TIMEZONE,
 ) -> dict[str, float]:
-    """Return `{iso_date: real_max_temp_fahrenheit}` for NYC, for every real
+    """Return `{iso_date: real_max_temp_fahrenheit}` for a station (NYC by
+    default; this function's name and `cache_path` default predate this
+    project's second station and are kept for backward compatibility --
+    pass `latitude`/`longitude`/`cache_path` explicitly for any other real
+    station, as `TemperatureMarketFamily` now does), for every real
     date in `[start_date, end_date]` Open-Meteo's archive has data for,
     cached locally (mirroring `data.fetch_wti_daily`'s own CSV-cache
     pattern) so repeated calls don't re-hit the real API for dates already
@@ -181,7 +234,7 @@ def fetch_nyc_temp_daily(
     )
 
     if refresh or not all_dates_present:
-        fresh = _fetch_open_meteo_range(start_date, end_date, latitude, longitude)
+        fresh = _fetch_open_meteo_range(start_date, end_date, latitude, longitude, timezone=timezone)
         if not fresh:
             raise TemperatureDataFetchError(
                 f"Open-Meteo returned no real data for [{start_date}, {end_date}]"
