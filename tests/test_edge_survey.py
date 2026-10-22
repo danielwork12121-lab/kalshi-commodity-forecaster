@@ -16,6 +16,16 @@ from commodity_forecast.kalshi_client import KalshiMarketQuote, _parse_market
 
 FIXTURES = pathlib.Path(__file__).resolve().parent / "fixtures"
 
+# v0.9.0: the real WTI scoring logic (and the module-level `fetch_markets` /
+# `fetch_settlement_brackets` / `fetch_wti_daily` / `fit_calibrated_forecaster_horizon`
+# names these tests patch) moved to `commodity_forecast.markets.wti` -- see
+# that module's own docstring and `edge_survey.py`'s updated module
+# docstring for the full account. `survey_live_edges` itself is unchanged
+# as a public, backward-compatible entry point, so every assertion below
+# (skip reasons, counts, horizon picked, liquidity caveats, model_name
+# behavior) is unchanged from before the refactor -- only the monkeypatch
+# targets moved to match where the real code now lives.
+
 
 def _load_open_ladder_quotes():
     """The real, captured, currently-open KXWTI daily ladder from
@@ -51,7 +61,7 @@ def _frozen_spot_series_through_2026_10_14():
     did exactly what it's supposed to: skip a market that's already
     closed) -- a real test-design fragility, now fixed by freezing the
     one input (the spot series) these tests actually need held constant,
-    via `survey_live_edges`'s new `series=` parameter."""
+    via `survey_live_edges`'s own `series=` parameter."""
     from commodity_forecast.data import fetch_wti_daily
 
     return fetch_wti_daily(cache_path=FIXTURES / "wti_spot_daily_through_2026-10-14.csv", refresh=False)
@@ -148,6 +158,9 @@ def test_format_edge_subset_summary_reports_empty_subsets_as_na_not_hidden():
 
 
 # --- survey_live_edges: a real end-to-end run against real, captured fixture data ---
+# (v0.9.0: the real scoring logic lives in `commodity_forecast.markets.wti`
+# now, so the live network calls replaced below are patched there, not on
+# `commodity_forecast.edge_survey` -- see this file's own top-of-file note.)
 
 
 def test_survey_live_edges_scores_the_real_captured_open_ladder(monkeypatch):
@@ -161,16 +174,16 @@ def test_survey_live_edges_scores_the_real_captured_open_ladder(monkeypatch):
     picked, liquidity caveat, count skipped) are all independent of which
     point model was fit, but pinning the pre-0.8.0 default here keeps this
     test's own intent -- a frozen-fixture regression check -- honest and
-    decoupled from `survey_live_edges`'s own live default, which changed
-    to `"transformer"` this version. See
+    decoupled from `survey_live_edges`'s own live default, which is
+    `"transformer"`. See
     `test_survey_live_edges_defaults_to_the_transformer_model` below for a
     dedicated check of the new default itself."""
     open_quotes = _load_open_ladder_quotes()
     settlement_quotes = _load_settlement_history_quotes()
 
-    monkeypatch.setattr("commodity_forecast.edge_survey.fetch_markets", lambda *a, **kw: open_quotes)
+    monkeypatch.setattr("commodity_forecast.markets.wti.fetch_markets", lambda *a, **kw: open_quotes)
     monkeypatch.setattr(
-        "commodity_forecast.edge_survey.fetch_settlement_brackets",
+        "commodity_forecast.markets.wti.fetch_settlement_brackets",
         lambda *a, **kw: bracket_settlements(settlement_quotes),
     )
 
@@ -219,10 +232,10 @@ def test_survey_live_edges_skips_a_market_with_an_unsupported_strike_type(monkey
     settlement_quotes = _load_settlement_history_quotes()
 
     monkeypatch.setattr(
-        "commodity_forecast.edge_survey.fetch_markets", lambda *a, **kw: open_quotes + [unsupported]
+        "commodity_forecast.markets.wti.fetch_markets", lambda *a, **kw: open_quotes + [unsupported]
     )
     monkeypatch.setattr(
-        "commodity_forecast.edge_survey.fetch_settlement_brackets",
+        "commodity_forecast.markets.wti.fetch_settlement_brackets",
         lambda *a, **kw: bracket_settlements(settlement_quotes),
     )
 
@@ -254,10 +267,10 @@ def test_survey_live_edges_skips_a_market_beyond_every_validated_horizon(monkeyp
     settlement_quotes = _load_settlement_history_quotes()
 
     monkeypatch.setattr(
-        "commodity_forecast.edge_survey.fetch_markets", lambda *a, **kw: open_quotes + [too_far_out]
+        "commodity_forecast.markets.wti.fetch_markets", lambda *a, **kw: open_quotes + [too_far_out]
     )
     monkeypatch.setattr(
-        "commodity_forecast.edge_survey.fetch_settlement_brackets",
+        "commodity_forecast.markets.wti.fetch_settlement_brackets",
         lambda *a, **kw: bracket_settlements(settlement_quotes),
     )
 
@@ -281,12 +294,12 @@ def test_survey_live_edges_passing_series_never_calls_fetch_wti_daily(monkeypatc
     def _must_not_be_called(*args, **kwargs):
         raise AssertionError("fetch_wti_daily should not be called when series= is given")
 
-    monkeypatch.setattr("commodity_forecast.edge_survey.fetch_markets", lambda *a, **kw: open_quotes)
+    monkeypatch.setattr("commodity_forecast.markets.wti.fetch_markets", lambda *a, **kw: open_quotes)
     monkeypatch.setattr(
-        "commodity_forecast.edge_survey.fetch_settlement_brackets",
+        "commodity_forecast.markets.wti.fetch_settlement_brackets",
         lambda *a, **kw: bracket_settlements(settlement_quotes),
     )
-    monkeypatch.setattr("commodity_forecast.edge_survey.fetch_wti_daily", _must_not_be_called)
+    monkeypatch.setattr("commodity_forecast.markets.wti.fetch_wti_daily", _must_not_be_called)
 
     surveyed, skipped = survey_live_edges(series=_frozen_spot_series_through_2026_10_14(), model_name="naive")
     assert skipped == []
@@ -300,7 +313,9 @@ def test_survey_live_edges_rejects_unknown_model_name():
     """`model_name` is validated up front, the same discipline
     `forecast.fit_calibrated_forecaster_horizon` already uses for the same
     parameter -- a typo here should fail loudly, immediately, not after a
-    real (possibly slow) model fit is already underway."""
+    real (possibly slow) model fit is already underway. Since v0.9.0 this
+    validation happens in `WTIMarketFamily.__init__`, reached as soon as
+    `survey_live_edges` constructs one."""
     with pytest.raises(ValueError, match="model_name"):
         survey_live_edges(series=_frozen_spot_series_through_2026_10_14(), model_name="bogus")
 
@@ -317,20 +332,20 @@ def test_survey_live_edges_defaults_to_the_transformer_model(monkeypatch):
     settlement_quotes = _load_settlement_history_quotes()
     seen_model_names = []
 
-    import commodity_forecast.edge_survey as edge_survey_module
+    import commodity_forecast.markets.wti as wti_module
 
-    real_fit = edge_survey_module.fit_calibrated_forecaster_horizon
+    real_fit = wti_module.fit_calibrated_forecaster_horizon
 
     def _spy(*args, **kwargs):
         seen_model_names.append(kwargs.get("model_name"))
         return real_fit(*args, **kwargs)
 
-    monkeypatch.setattr("commodity_forecast.edge_survey.fetch_markets", lambda *a, **kw: open_quotes)
+    monkeypatch.setattr("commodity_forecast.markets.wti.fetch_markets", lambda *a, **kw: open_quotes)
     monkeypatch.setattr(
-        "commodity_forecast.edge_survey.fetch_settlement_brackets",
+        "commodity_forecast.markets.wti.fetch_settlement_brackets",
         lambda *a, **kw: bracket_settlements(settlement_quotes),
     )
-    monkeypatch.setattr("commodity_forecast.edge_survey.fit_calibrated_forecaster_horizon", _spy)
+    monkeypatch.setattr("commodity_forecast.markets.wti.fit_calibrated_forecaster_horizon", _spy)
 
     surveyed, skipped = survey_live_edges(series=_frozen_spot_series_through_2026_10_14())
 
@@ -353,9 +368,9 @@ def test_survey_live_edges_naive_and_transformer_give_real_different_probabiliti
     open_quotes = _load_open_ladder_quotes()
     settlement_quotes = _load_settlement_history_quotes()
 
-    monkeypatch.setattr("commodity_forecast.edge_survey.fetch_markets", lambda *a, **kw: open_quotes)
+    monkeypatch.setattr("commodity_forecast.markets.wti.fetch_markets", lambda *a, **kw: open_quotes)
     monkeypatch.setattr(
-        "commodity_forecast.edge_survey.fetch_settlement_brackets",
+        "commodity_forecast.markets.wti.fetch_settlement_brackets",
         lambda *a, **kw: bracket_settlements(settlement_quotes),
     )
 
