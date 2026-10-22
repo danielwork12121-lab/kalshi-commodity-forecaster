@@ -1,4 +1,4 @@
-"""A real, cross-sectional edge survey across the live `KXWTI` ladder.
+"""A real, cross-sectional edge survey across a live Kalshi market ladder.
 
 ## Why this exists
 
@@ -15,65 +15,57 @@ strikes?
 ## Honest scope, stated plainly up front
 
 This module answers that question from **one real, live snapshot** --
-whatever real open markets exist on a series (default `KXWTI`) at the
-moment `survey_live_edges` is called -- broken down by real dimensions
-available on that one snapshot (basis-adjusted strike distance from the
-live spot price, real forecast horizon, and real liquidity). This is
+whatever real open markets exist on a series at the moment
+`survey_live_edges` is called -- broken down by real dimensions available
+on that one snapshot (basis-adjusted strike distance from the live
+reference price, real forecast horizon, and real liquidity). This is
 **NOT** a persistence claim across multiple points in time: a subset that
 shows a larger edge on one day's ladder could easily be noise, not a real,
-repeatable pattern, and this project has no repeated-snapshot history yet
-to tell the difference. See `summarize_edge_subsets`'s own docstring and
-the README's "Edge-subset survey" section for how this is reported --
-honestly, as a single-snapshot cross-section, never oversold as evidence
-of a *persistent* edge. The natural next step (not yet attempted) is
-running this same survey on successive scheduled runs and checking whether
-any one subset's edge sign/magnitude actually holds up over time, which is
-the only way a "persistent" claim could honestly be supported.
+repeatable pattern -- see `edge_persistence.py` for the machinery that
+actually checks persistence across repeated snapshots. See
+`summarize_edge_subsets`'s own docstring and the README's "Edge-subset
+survey" section for how this is reported -- honestly, as a single-snapshot
+cross-section, never oversold as evidence of a *persistent* edge.
 
 Every real market this survey cannot honestly score (an unsupported
 strike shape, a horizon beyond what this project has validated) is
 reported in `skipped` with a plain-English reason -- never silently
 dropped, same discipline as every other module in this project.
+
+## v0.9.0: the WTI-specific scoring logic moved to `markets/wti.py`
+
+Through v0.8.0, this module did everything inline: fetch the real open
+WTI ladder, fetch the real spot series and settlement brackets, compute
+the real basis correction, fit a horizon-validated forecaster, score each
+market, and call `edge.compute_edge`. `active-project-kalshi.md`'s
+2026-10-21 direction-update item 2 calls for growing this into a genuine
+multi-market framework (temperature-vs-NWS next) rather than re-measuring
+the WTI ladder forever, so that WTI-specific logic is now
+`markets.wti.WTIMarketFamily`, the first implementation of the common
+`markets.base.MarketFamily` interface -- **ported with no change to its
+real, already-tested behavior.** `survey_live_edges` below is now a thin
+backward-compatible wrapper: build a `WTIMarketFamily` from the same
+parameters it always took, and call the new market-agnostic
+`markets.base.run_family_survey`. `SurveyedEdge` itself moved to
+`markets/base.py` (so `run_family_survey` can build one without an import
+cycle back into this module) and is re-exported here unchanged for every
+existing import site.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-import numpy as np
+from commodity_forecast.markets.base import SurveyedEdge, run_family_survey
+from commodity_forecast.markets.wti import WTIMarketFamily
 
-from commodity_forecast.benchmark import (
-    basis_adjusted_strike,
-    describe_basis_correction,
-    fetch_settlement_brackets,
-    measure_basis,
-    recent_basis_estimate,
-)
-from commodity_forecast.data import fetch_wti_daily
-from commodity_forecast.edge import (
-    EdgeEstimate,
-    compute_edge,
-    days_to_close_from_last_observation,
-    pick_validated_horizon,
-)
-from commodity_forecast.forecast import MODEL_NAMES, fit_calibrated_forecaster_horizon
-from commodity_forecast.kalshi_client import fetch_markets
-from commodity_forecast.probability import exceedance_probability
-
-
-@dataclass
-class SurveyedEdge:
-    """One real `EdgeEstimate` plus the real cross-sectional metadata this
-    survey groups by. Kept separate from `EdgeEstimate` itself (a single-
-    market concept `edge.py` already owns and that other callers construct
-    directly) so this module can add survey-only context without changing
-    that dataclass's shape or its existing tests/callers.
-    """
-
-    estimate: EdgeEstimate
-    days_to_close: float
-    horizon_used: int
-    strike_distance_usd: float  # basis-adjusted strike minus last observed spot price; >0 = strike above spot
+__all__ = [
+    "SurveyedEdge",
+    "EdgeSubsetSummary",
+    "survey_live_edges",
+    "summarize_edge_subsets",
+    "format_edge_subset_summary",
+]
 
 
 def survey_live_edges(
@@ -90,136 +82,48 @@ def survey_live_edges(
     market in `series_ticker`. See the module docstring for the honest
     scope (one live snapshot, not a persistence claim).
 
+    Since v0.9.0, this is a thin wrapper: build a
+    `markets.wti.WTIMarketFamily` from these exact parameters (unchanged
+    meaning from v0.8.0 -- see that class's own docstring), then run the
+    market-agnostic `markets.base.run_family_survey` over it. Every real,
+    measured behavior (skip reasons, horizon selection, basis correction,
+    liquidity caveats, the live default `model_name="transformer"`) is
+    unchanged from v0.8.0; only the module the scoring logic itself lives
+    in moved (`markets.wti`, not here) -- see that module's docstring for
+    the full account.
+
     `series` defaults to a real fetch (`fetch_wti_daily(refresh=refresh_spot)`)
     -- pass an explicit one (e.g. in tests) to pin what "last observed
     date" this call uses, the same escape hatch `track_record.py`'s own
-    `resolve_pending_predictions` already offers for the same reason: this
-    function's output depends on *when* it's run relative to the real spot
-    series, so a test that wants a deterministic, time-independent result
-    (rather than one that silently drifts whenever the real committed data
-    cache is next refreshed) needs a way to freeze that input. (v0.7.2:
-    added after a real cache refresh broke three tests whose fixtures
-    assumed a specific, now-stale last-observed date -- see the README's
-    "Edge-subset survey" section and Known issue tracking in
-    `active-project-kalshi.md` for the full account.)
+    `resolve_pending_predictions` already offers for the same reason.
 
-    `model_name` (v0.8.0, default changed from the naive-only hardcoded
-    path to `"transformer"`): which of `forecast.MODEL_NAMES` to fit via
+    `model_name`: which of `forecast.MODEL_NAMES` to fit via
     `fit_calibrated_forecaster_horizon` for every horizon this ladder
-    actually needs. Changed from always-naive to transformer-by-default
-    per the 2026-10-21 live-chat direction update, on the strength of
-    v0.7.0's real, measured finding that the Transformer point model has a
-    consistently better MAE and a smaller coverage gap than naive from
-    horizon 3 onward (see the README's "Does a stronger point model help
-    at the horizon markets actually need?" section) -- this is a real
-    engineering decision about which already-validated model the live
-    pipeline should use, not a new, unvalidated claim. Pass
-    `model_name="naive"` to reproduce the exact pre-0.8.0 behavior (used by
-    this project's own frozen-fixture regression tests, which intentionally
-    pin the old naive-model numbers rather than silently following the
-    default forward). `seed` is forwarded to the model constructor for
-    `"lstm"`/`"transformer"` (unused by `"naive"`, which has no randomness)
-    -- a fixed default so a live run's own result is reproducible given the
-    same input series.
+    actually needs. Defaults to `"transformer"` (v0.8.0) on the strength
+    of v0.7.0's real, measured finding that the Transformer point model
+    has a consistently better MAE and a smaller coverage gap than naive
+    from horizon 3 onward. Pass `model_name="naive"` to reproduce the
+    exact pre-0.8.0 behavior (used by this project's own frozen-fixture
+    regression tests). `seed` is forwarded to the model constructor for
+    `"lstm"`/`"transformer"` (unused by `"naive"`).
 
     Returns `(surveyed, skipped)`: `surveyed` holds one `SurveyedEdge` per
     real open market this project could honestly score; `skipped` holds a
     plain-English reason string for each real open market it could NOT
     score (never silently dropped). Fits at most one horizon-validated
     forecaster per distinct real horizon the live ladder actually needs
-    (never refit per-market), via the same already-tested
-    `fit_calibrated_forecaster_horizon` the horizon-model comparison (v0.7)
-    already validated.
+    (never refit per-market).
     """
-    if model_name not in MODEL_NAMES:
-        raise ValueError(f"Unknown model_name {model_name!r}; must be one of {MODEL_NAMES}")
-
-    quotes = fetch_markets(series_ticker, status="open")
-    if series is None:
-        series = fetch_wti_daily(refresh=refresh_spot)
-    last_observed_date = series.index.max()
-    last_observed_price = float(series.iloc[-1])
-
-    brackets = fetch_settlement_brackets(series_ticker)
-    spot_by_date = {d.date().isoformat(): float(v) for d, v in series.items()}
-    measurements = measure_basis(brackets, spot_by_date)
-    basis_est = recent_basis_estimate(measurements)
-    if basis_est is not None:
-        basis_mean, basis_stdev, basis_n = basis_est
-        basis_trustworthy, basis_note = describe_basis_correction(basis_mean, basis_stdev, basis_n)
-    else:
-        basis_mean, basis_trustworthy = 0.0, False
-        basis_note = "no real settlement brackets available to measure a basis this run"
-
-    fitted_by_horizon: dict[int, object] = {}
-    surveyed: list[SurveyedEdge] = []
-    skipped: list[str] = []
-
-    for quote in quotes:
-        if quote.strike_type != "greater" or quote.floor_strike is None:
-            skipped.append(
-                f"{quote.ticker}: strike_type={quote.strike_type!r} is not a simple 'above $X' "
-                "question this survey knows how to score, skipped"
-            )
-            continue
-
-        days_to_close = days_to_close_from_last_observation(quote.close_time, last_observed_date)
-        if days_to_close < 0:
-            skipped.append(
-                f"{quote.ticker}: close_time is before this project's own last observed spot date "
-                f"({last_observed_date.date().isoformat()}), skipped"
-            )
-            continue
-
-        horizon = pick_validated_horizon(days_to_close)
-        if horizon is None:
-            skipped.append(
-                f"{quote.ticker}: real days_to_close={days_to_close:.1f} exceeds every horizon this "
-                "project has validated -- skipped rather than extrapolated past where it's trustworthy"
-            )
-            continue
-
-        if horizon not in fitted_by_horizon:
-            fitted_by_horizon[horizon] = fit_calibrated_forecaster_horizon(
-                series.values, horizon=horizon, model_name=model_name, lookback=lookback, alpha=alpha, seed=seed
-            )
-        result = fitted_by_horizon[horizon]
-
-        last_window_normalized = (
-            (np.asarray(series.values[-lookback:], dtype=np.float64) - result.normalizer_mean)
-            / result.normalizer_std
-        ).reshape(1, -1)
-        point_forecast_normalized = result.conformal_forecaster.model.predict(last_window_normalized).reshape(-1)
-
-        adjusted_strike = (
-            basis_adjusted_strike(quote.floor_strike, basis_mean) if basis_trustworthy else quote.floor_strike
-        )
-        threshold_normalized = (adjusted_strike - result.normalizer_mean) / result.normalizer_std
-
-        our_probability = float(
-            exceedance_probability(point_forecast_normalized, result.cal_residuals_normalized, threshold_normalized)[0]
-        )
-
-        estimate = compute_edge(
-            our_probability=our_probability,
-            quote=quote,
-            strike_usd=adjusted_strike,
-            settlement_benchmark_matches_forecast=basis_trustworthy,
-            min_volume_for_trust=min_volume_for_trust,
-            forecast_horizon_days=horizon,
-            days_to_close=days_to_close,
-            basis_note=basis_note,
-        )
-        surveyed.append(
-            SurveyedEdge(
-                estimate=estimate,
-                days_to_close=days_to_close,
-                horizon_used=horizon,
-                strike_distance_usd=adjusted_strike - last_observed_price,
-            )
-        )
-
-    return surveyed, skipped
+    family = WTIMarketFamily(
+        series_ticker=series_ticker,
+        lookback=lookback,
+        alpha=alpha,
+        refresh_spot=refresh_spot,
+        series=series,
+        model_name=model_name,
+        seed=seed,
+    )
+    return run_family_survey(family, min_volume_for_trust=min_volume_for_trust)
 
 
 @dataclass
