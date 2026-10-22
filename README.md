@@ -102,7 +102,17 @@ commodity_forecast/
                    WTIMarketFamily, this project's own WTI-specific
                    scoring logic ported out of edge_survey.py with no
                    change to its real, already-tested behavior. See "A
-                   multi-market framework" below.
+                   multi-market framework" below. (new, v0.10.0)
+                   temperature.py is TemperatureMarketFamily, this
+                   framework's second real family, scoring the real,
+                   live KXHIGH<STATION> daily-high-temperature ladder via
+                   a real climatological empirical distribution rather
+                   than an autoregressive point forecast -- see "The
+                   temperature family" below
+  temperature_data.py (new, v0.10.0) real historical NYC daily-max-
+                   temperature data from Open-Meteo's free, public
+                   archive API, cached locally the same way data.py
+                   caches EIA spot prices
   edge_survey.py   (since 2026-10-19) survey_live_edges + summarize_edge_subsets
                    -- runs the real edge.py pipeline across every real
                    open market on a series in one call, instead of one
@@ -1733,6 +1743,129 @@ dedicated slice — see "What's next" below. This run was deliberately
 scoped to the interface + WTI refactor alone, verified and pushed as its
 own complete, tested unit, per this project's "ship in slices" discipline.
 
+## The temperature family: real climatology vs. The Weather Company (v0.10.0, 2026-10-22)
+
+v0.9.0's own "What's next" named the temperature-vs-NWS family as the
+direct next slice. Real research while building it (recorded in
+`active-project-kalshi.md`'s sixteenth-run notes) found the premise
+needed correcting first: `KXHIGHNY`'s real settlement source is **The
+Weather Company**, not NWS (confirmed directly via
+`kalshi_client.fetch_series("KXHIGHNY")["settlement_sources"]` and every
+real market's own `rules_primary` text — e.g. *"...according to The
+Weather Company..."*). NWS's own public API is also forward-looking only
+(it serves its *current* forecast, with no free historical archive of
+past forecasts to honestly backtest against) — using it would mean either
+forecasting against the wrong real benchmark, or backtesting against a
+source this project can't actually replay history for. This run took a
+different, more directly verifiable path instead.
+
+**The real design decision: forecast real historical actuals with
+climatology, and measure — don't assume — the gap to the real settlement
+source.** Rather than a live NWS point forecast, `TemperatureMarketFamily`
+forecasts using a real **climatological empirical distribution**: the
+actual real historical daily-max-temperature readings for NYC on/near the
+same calendar date across many real past years, sourced from Open-Meteo's
+free, public, no-API-key historical archive (`temperature_data.py`) —
+decades of real daily history, unlike a forecast-only API. This is a
+real, standard meteorological baseline method, not invented to force a
+clean story, and — critically — it's directly backtestable against real
+history the way a live-only forecast API isn't.
+
+**A real, measured basis check, the same discipline as WTI's own
+spot/futures correction.** Kalshi's own real settled `"between"` markets
+for `KXHIGHNY` directly report which one-degree bracket the real
+settlement actually fell in — a more *direct* real measurement than WTI's
+own bracket-recovery method (which has to reconstruct a bracket from a
+ladder of separate "greater than" markets; here Kalshi just tells you the
+real answer outright). Pairing 23 of these real settled brackets
+(2026-09-19 through 2026-10-21) with this project's own real Open-Meteo
+reading for the same real date:
+
+```
+n = 23 real paired observations
+mean basis (Weather Company bracket midpoint − Open-Meteo reading): −0.35 degF
+stdev: 1.14 degF
+```
+
+Applying the same pre-registered trust bar WTI's own basis correction
+uses (`stdev <= 1.0`, never loosened to force a pass): **this basis is
+NOT trustworthy** — reported plainly, the same honesty this project
+applied when WTI's own trust gate failed. The live family still measures
+and reports this basis on every real run (see
+`describe_temperature_basis_correction`), and applies it automatically
+the moment a future run's real measurement does clear the bar — same
+mechanism as WTI's `describe_basis_correction`, reused by design, not
+reimplemented.
+
+**A real, disclosed modeling choice: the ±0.5 degF continuity
+correction.** The Weather Company's own reported reading, and every real
+`rules_primary` text, treats the settlement as a whole-degree integer
+value, and every real `"between"` bracket observed is exactly one degree
+wide. Converting an integer-valued threshold into a query against this
+project's own continuous empirical distribution uses the standard
+continuity correction: "greater than 64" becomes `P(X > 64.5)`, "less
+than 57" becomes `P(X < 56.5)`, "between 63-64" becomes
+`P(62.5 < X < 64.5)` — stated here rather than silently assumed.
+
+**A real, measured calibration check of the climatology method itself** —
+leave-one-year-out, against 20 real years (2006-2025) of real cached
+Open-Meteo history, 7-day window, holding each real year out of its own
+evaluation:
+
+```
+target coverage   measured coverage      n   window (days)
+            80%              80.9%   1461               7
+            90%              89.6%   1461               7
+```
+
+A real, honestly strong result — within 1 percentage point of nominal at
+both levels, on a real, out-of-sample (leave-one-year-out), non-trivial
+sample size. This is a genuinely different outcome than most of this
+project's other real calibration checks (which have more often been
+mixed/case-dependent) — reported exactly as measured, not downplayed or
+oversold.
+
+**The real, live first snapshot (2026-10-22).** `TemperatureMarketFamily`
+against the real, live, open `KXHIGHNY` ladder: **12 real open markets,
+0 skipped** — every real strike shape (`"greater"`, `"less"`,
+`"between"`) scored successfully, confirming the strike-type logic
+actually works against the real API, not just synthetic fixtures. Because
+the real basis correction above didn't clear the trust bar, every
+estimate's `settlement_benchmark_matches_forecast` is honestly `False`,
+so the `trustworthy_only=True` subset summary — the only one this
+project ever treats as a real signal — comes back `n=0` across every
+subset, the same honest "not enough trustworthy data yet" shape WTI's own
+early snapshots showed. The raw, uncorrected comparison (informational
+only) showed a ladder-wide mean edge of −0.0042 across all 12 markets —
+close to zero, consistent with no obvious mispricing, not a finding
+either way with n=12. Recorded as this family's first real entry in the
+new `data/edge_subset_history_temperature.jsonl`.
+
+**Tests: 37 new (145 → 182).** `tests/test_temperature_data.py` (caching
+behavior, the `series=` escape hatch, a real missing-date error path, and
+a real live integration test against the actual Open-Meteo API — same
+discipline as this project's existing real live Kalshi API test).
+`tests/test_markets_temperature.py` (ticker-date parsing for every real
+strike shape; real-settled-bracket extraction and basis pairing on
+synthetic data; the trust-gate boundary; climatology window/New-Year
+wraparound; a leave-one-year-out backtest sanity check against a known
+synthetic distribution; `TemperatureMarketFamily.estimate_probability`
+exercised end-to-end for all three strike shapes with a frozen,
+deterministic synthetic climatology series (exact expected probabilities,
+not just "did it run"); and a real, live end-to-end integration test
+against the actual `KXHIGHNY` ladder). Plus 2 new tests in
+`tests/test_kalshi_client.py` for the new `cap_strike` field (real
+captured fixture, `tests/fixtures/kxhighny_markets_live_2026-10-22.json`).
+**Verified 182/182 passed.**
+
+**A real, small, backward-compatible change to `kalshi_client.py`:**
+`KalshiMarketQuote` gained a `cap_strike: float | None = None` field
+(and `_parse_market` now reads it) — every series this project scored
+through v0.9.0 (`KXWTI`) only ever used `strike_type="greater"`, so
+`cap_strike` was never parsed; `KXHIGHNY`'s real ladder genuinely needs it
+for `"less"`/`"between"` markets. The default keeps every existing WTI
+test/fixture unaffected.
+
 ## What's next
 
 1. ~~Try `conformal-forecast`'s existing Adaptive Conformal Inference
@@ -1950,14 +2083,40 @@ own complete, tested unit, per this project's "ship in slices" discipline.
     above: `markets/base.py` (`MarketFamily`, `ProbabilityEstimate`,
     `MarketNotScorable`, `run_family_survey`) and `markets/wti.py`
     (`WTIMarketFamily`, a faithful, test-verified port of the pre-v0.9.0
-    inline logic). **The temperature-vs-NWS family itself is not yet
-    built — that's the next run's own dedicated slice** (a new
-    `markets/temperature.py` implementing `MarketFamily` against a real
-    Kalshi daily-high-temperature series and real NWS point forecasts for
-    the settlement station; the EIA-weekly-storage family stays the
-    second candidate after that). Keep accumulating Transformer-model WTI
-    persistence snapshots on future runs regardless (2 real entries as of
-    v0.9.0) — building the new family doesn't retire the existing one.
+    inline logic). **The temperature family itself: done (v0.10.0,
+    2026-10-22)** — see "The temperature family" above.
+    `markets/temperature.py`'s `TemperatureMarketFamily` scores the real,
+    live `KXHIGHNY` ladder via a real climatological empirical
+    distribution (not NWS point forecasts — real research found the real
+    settlement source is The Weather Company, not NWS; see above for the
+    full account), with a real, measured (not assumed) basis check
+    against that real benchmark, handling all three real strike shapes.
+    The real basis correction didn't clear this project's own trust bar
+    this run — reported honestly, same as WTI's own early snapshots.
+    EIA-weekly-storage stays the next market-family candidate. Keep
+    accumulating both WTI Transformer-model and temperature-family
+    persistence snapshots on future runs regardless — building one family
+    doesn't retire another.
+11. **(New, v0.10.0) Keep accumulating real temperature-family snapshots,
+    and watch whether the basis correction's own trust gate ever clears.**
+    One real live snapshot and one real 23-point basis measurement is an
+    honest start, not a verdict — the same "don't call it persistent from
+    one point" discipline this project already applies to WTI's own
+    edge-subset survey. Concretely: (a) keep recording real
+    `edge_subset_history_temperature.jsonl` snapshots on future runs so a
+    real persistence verdict (3+ snapshots, mirroring
+    `edge_persistence.py`'s own bar) becomes possible; (b) keep
+    re-measuring the real Weather-Company-vs-Open-Meteo basis as more real
+    settled brackets accumulate — the current stdev (1.14 degF) sits close
+    enough to the 1.0 bar that more real data could honestly resolve it
+    either way, not just confirm the current miss; (c) consider a second
+    real station (`KXHIGHCHI`, `KXHIGHLAX`, `KXHIGHAUS`, `KXHIGHMIA` are
+    all real, currently open) once `KXHIGHNY` itself has a few more real
+    snapshots, to see whether the basis/calibration findings are
+    NYC-specific or general; (d) the EIA-weekly-storage family remains the
+    next genuinely *new* market family to build, after the temperature
+    family has had a chance to accumulate real persistence data rather
+    than being abandoned after one snapshot.
 
 ## Running it
 
