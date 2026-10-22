@@ -121,6 +121,46 @@ def test_describe_temperature_basis_correction_applies_the_same_bar_as_wti(stdev
     assert "Weather Company" in note
 
 
+def test_describe_temperature_basis_correction_defaults_to_nyc_but_accepts_another_station():
+    """The real bug this run found and fixed: the note text used to say
+    "NYC" unconditionally. `station_label` must default to `"NYC"`
+    (unchanged behavior for every existing caller) but actually say a
+    different real station's name when passed one."""
+    _, nyc_note = describe_temperature_basis_correction(0.3, 0.5, 10)
+    assert "NYC" in nyc_note
+
+    _, miami_note = describe_temperature_basis_correction(0.3, 0.5, 10, station_label="Miami")
+    assert "Miami" in miami_note
+    assert "NYC" not in miami_note
+
+
+def test_family_passes_the_real_station_label_for_its_own_basis_note(monkeypatch):
+    """End-to-end check that `TemperatureMarketFamily.__init__` actually
+    wires the fix above through: a Miami family's own real basis note
+    must say "Miami", not "NYC"."""
+    monkeypatch.setattr(
+        temp_mod,
+        "fetch_real_settled_brackets",
+        lambda *a, **k: [
+            TemperatureBracket(date="2026-10-01", floor_strike=79.0, cap_strike=80.0),
+            TemperatureBracket(date="2026-10-02", floor_strike=80.0, cap_strike=81.0),
+            TemperatureBracket(date="2026-10-03", floor_strike=81.0, cap_strike=82.0),
+            TemperatureBracket(date="2026-10-04", floor_strike=80.0, cap_strike=81.0),
+            TemperatureBracket(date="2026-10-05", floor_strike=79.0, cap_strike=80.0),
+        ],
+    )
+    series = {
+        "2026-10-01": 79.4,
+        "2026-10-02": 80.4,
+        "2026-10-03": 81.4,
+        "2026-10-04": 80.4,
+        "2026-10-05": 79.4,
+    }
+    family = TemperatureMarketFamily(series_ticker="KXHIGHMIA", series=series, window_days=10)
+    assert "Miami" in family._basis_note
+    assert "NYC" not in family._basis_note
+
+
 # ---------------------------------------------------------------------------
 # Climatology
 # ---------------------------------------------------------------------------
@@ -299,6 +339,100 @@ def test_family_real_live_kxhighny_end_to_end():
     from commodity_forecast.markets.base import run_family_survey
 
     family = TemperatureMarketFamily()
+    surveyed, skipped = run_family_survey(family)
+
+    assert len(surveyed) + len(skipped) > 0
+    for s in surveyed:
+        assert 0.0 <= s.estimate.our_probability <= 1.0
+
+
+# ---------------------------------------------------------------------------
+# Per-station cache isolation (2026-10-22 bug fix) + the real Miami station
+# ---------------------------------------------------------------------------
+
+
+def test_default_cache_path_differs_per_station():
+    """The real bug this run found and fixed: before this, every station's
+    `TemperatureMarketFamily` silently read/wrote the one hardcoded NYC
+    cache path. `default_cache_path_for_station` -- and `__init__`'s own
+    use of it as the `cache_path` default -- must give each station its
+    own distinct real file."""
+    from commodity_forecast.temperature_data import default_cache_path_for_station
+
+    nyc_path = default_cache_path_for_station("KXHIGHNY")
+    miami_path = default_cache_path_for_station("KXHIGHMIA")
+    assert nyc_path != miami_path
+    assert nyc_path.name == "nyc_temp_daily.csv"
+    assert miami_path.name == "miami_temp_daily.csv"
+
+
+def test_family_uses_its_own_default_cache_path_not_a_shared_one(monkeypatch, tmp_path):
+    """Regression test for the real fix: construct two `TemperatureMarketFamily`
+    instances for two different stations (both with `series=` fixtures, so
+    no real network call happens) and confirm `fetch_nyc_temp_daily` --
+    the one real function that touches a cache file -- is actually called
+    with two *different* `cache_path` values, one per station, rather than
+    the same hardcoded NYC path for both (the real bug this run fixed)."""
+    seen_cache_paths: list = []
+    real_fetch = temp_mod.fetch_nyc_temp_daily
+
+    def spy(*args, **kwargs):
+        seen_cache_paths.append(kwargs.get("cache_path"))
+        return real_fetch(*args, **kwargs)
+
+    monkeypatch.setattr(temp_mod, "fetch_nyc_temp_daily", spy)
+    monkeypatch.setattr(temp_mod, "fetch_real_settled_brackets", lambda *a, **k: [])
+
+    series = _frozen_climatology_series()
+    TemperatureMarketFamily(series_ticker="KXHIGHNY", series=series, window_days=10)
+    TemperatureMarketFamily(series_ticker="KXHIGHMIA", series=series, window_days=10)
+
+    assert len(seen_cache_paths) == 2
+    assert seen_cache_paths[0] != seen_cache_paths[1]
+    assert seen_cache_paths[0].name == "nyc_temp_daily.csv"
+    assert seen_cache_paths[1].name == "miami_temp_daily.csv"
+
+
+def test_family_accepts_an_explicit_cache_path_override(monkeypatch, tmp_path):
+    """An explicit `cache_path` (e.g. a test's own `tmp_path`) must still
+    win over the per-station default -- the fix adds a default, not a
+    hardcoded value that can no longer be overridden."""
+    monkeypatch.setattr(temp_mod, "fetch_real_settled_brackets", lambda *a, **k: [])
+    custom = tmp_path / "custom_cache.csv"
+    family = TemperatureMarketFamily(
+        series=_frozen_climatology_series(), window_days=10, cache_path=custom
+    )
+    assert family.series_ticker == "KXHIGHNY"
+    # No assertion error means construction succeeded with the override;
+    # `series=` bypasses the cache file entirely, so this just confirms the
+    # parameter is accepted and doesn't collide with `cache_path=None`'s
+    # default-computation path.
+
+
+def test_family_real_live_kxhighmia_end_to_end():
+    """Integration test: the real second station, Miami (`KXHIGHMIA`),
+    added 2026-10-22. Builds a real `TemperatureMarketFamily` against the
+    real, live `KXHIGHMIA` series and the real, live Open-Meteo archive
+    for Miami's own real coordinates -- no mocking, same discipline as
+    every other real live-API test in this suite. Scores every real
+    currently-open market; doesn't assert a specific probability (real,
+    live, will keep changing), just that the real pipeline runs end-to-end
+    without error, produces sane, in-range real probabilities, and --
+    the actual point of this test -- that it used Miami's own real cache
+    file, not NYC's."""
+    from commodity_forecast.markets.base import run_family_survey
+    from commodity_forecast.temperature_data import MIAMI_LATITUDE, MIAMI_LONGITUDE
+
+    family = TemperatureMarketFamily(
+        series_ticker="KXHIGHMIA", latitude=MIAMI_LATITUDE, longitude=MIAMI_LONGITUDE
+    )
+
+    from commodity_forecast.temperature_data import default_cache_path_for_station
+
+    # The actual point of this test: construction must have used Miami's
+    # own real cache file (not silently read/written NYC's).
+    assert default_cache_path_for_station("KXHIGHMIA").exists()
+
     surveyed, skipped = run_family_survey(family)
 
     assert len(surveyed) + len(skipped) > 0
