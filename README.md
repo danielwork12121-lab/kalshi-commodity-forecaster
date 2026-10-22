@@ -94,6 +94,15 @@ commodity_forecast/
                    correct for -- the real spot/futures basis against
                    this project's own EIA spot series; see "Resolving
                    the settlement-benchmark mismatch" below
+  markets/         (new, v0.9.0) the multi-market edge-survey framework --
+                   base.py defines MarketFamily (list_open_markets /
+                   estimate_probability / settle), ProbabilityEstimate,
+                   MarketNotScorable, and the market-agnostic
+                   run_family_survey driving loop; wti.py is
+                   WTIMarketFamily, this project's own WTI-specific
+                   scoring logic ported out of edge_survey.py with no
+                   change to its real, already-tested behavior. See "A
+                   multi-market framework" below.
   edge_survey.py   (since 2026-10-19) survey_live_edges + summarize_edge_subsets
                    -- runs the real edge.py pipeline across every real
                    open market on a series in one call, instead of one
@@ -114,7 +123,12 @@ commodity_forecast/
                    on the strength of v0.7's real, measured
                    stronger-point-model finding; model_name="naive"
                    reproduces the exact pre-0.8.0 behavior; see "Switching
-                   the live pipeline to the Transformer point model" below
+                   the live pipeline to the Transformer point model" below.
+                   (v0.9.0) survey_live_edges is now a thin wrapper around
+                   markets.wti.WTIMarketFamily + markets.base.run_family_survey
+                   -- same parameters, same real behavior, see "A
+                   multi-market framework" below. SurveyedEdge itself now
+                   lives in markets/base.py (re-exported here unchanged)
   edge_persistence.py (since 2026-10-19, continued) append_survey_snapshot
                    / load_survey_history / summarize_persistence -- records
                    each real edge_survey.py run to a JSONL history file
@@ -187,6 +201,15 @@ tests/
                         naive-only horizon forecaster exactly, that
                         lstm/transformer really do fit different models,
                         and that the comparison runs every requested cell
+  test_markets_base.py (new, v0.9.0) exercises run_family_survey and
+                        MarketFamily.settle's default implementation
+                        against a tiny, fully-synthetic MarketFamily --
+                        no real forecaster, no real basis correction, no
+                        network -- confirming the market-agnostic loop
+                        itself (scoring, skip-reason recording, an
+                        unrelated exception still propagating, a missing
+                        reference price producing NaN rather than a
+                        silent 0.0) is correct independent of WTI
 data/
   wti_spot_daily.csv real cached WTI daily spot price series, 1986-01-02 to
                      present. Never hand-edited -- a refresh overwrites it
@@ -209,7 +232,9 @@ data/
                      separate file so the two model series are never
                      conflated into one misleading persistence count; see
                      "Switching the live pipeline to the Transformer point
-                     model" below
+                     model" below. Two real entries as of v0.9.0, both
+                     honest n=0 (the basis-trust gate failing both times
+                     for the same model-independent reason)
 predictions/
   README.md         explains the forward track record's format and resolution rule
   track_record.jsonl the real, dated predictions themselves (first batch made and
@@ -1624,6 +1649,90 @@ NWS, EIA weekly storage) named alongside this decision is a separate,
 larger slice of work, not bundled into this version bump — see "What's
 next" below.
 
+## A multi-market framework: the shared interface + WTI refactor (v0.9.0, 2026-10-22)
+
+v0.8.0's own "What's next" named the real next step honestly: six naive-
+model snapshots and a first Transformer-model snapshot all agree the
+`KXWTI` ladder shows no trustworthy edge once the settlement-benchmark and
+liquidity caveats are applied. Re-measuring the same single market
+forever is not the same as making progress, so — per the 2026-10-21
+direction update — this project grows into a genuine multi-market edge
+framework, starting with the shared interface and a faithful refactor of
+the existing WTI logic into its first implementation.
+
+**What shipped this run, exactly as sketched in the direction update:**
+a new `commodity_forecast/markets/` package.
+
+- `markets/base.py` defines `MarketFamily` (an abstract base class with
+  `list_open_markets()` and `estimate_probability(market)` as the two
+  methods every family must implement, plus a concrete `settle(market)`
+  with a generic default — a Kalshi ticker's settlement lookup doesn't
+  depend on which family scored it, so no family needs to override this
+  unless it has a real reason to), `ProbabilityEstimate` (the generic
+  shape every family returns from `estimate_probability`), and
+  `MarketNotScorable` (the exception a family raises for one real market
+  it can't honestly score). It also defines `run_family_survey`: the one
+  market-agnostic driving loop every family shares — fetch the family's
+  own real open markets, ask it to score each one, compare against the
+  real market price via the *already* market-agnostic `edge.compute_edge`
+  (that module never knew anything WTI-specific to begin with), and
+  return the same `(surveyed, skipped)` shape `survey_live_edges` has
+  always returned.
+- `markets/wti.py` is `WTIMarketFamily` — the exact WTI scoring logic that
+  lived inline in `edge_survey.survey_live_edges` through v0.8.0 (fetch
+  the real spot series, fetch real settlement brackets, compute the real
+  recent-window basis estimate, fit a horizon-validated forecaster per
+  distinct horizon the ladder needs, basis-correct the strike), **ported
+  with no change to its real, already-tested behavior.** `edge_survey.survey_live_edges`
+  is now a thin backward-compatible wrapper: build a `WTIMarketFamily`
+  from the same parameters it always took, call `run_family_survey`.
+  `SurveyedEdge` moved to `markets/base.py` (to avoid an import cycle)
+  and is re-exported from `edge_survey.py` unchanged.
+
+**Verification that this was a faithful port, not a quiet rewrite:** the
+three pre-existing frozen-fixture end-to-end tests in
+`tests/test_edge_survey.py` — the ones that run the real scoring pipeline
+against a real, captured `KXWTI` ladder and assert exact skip reasons,
+the exact horizon picked (10), and that every estimate carries the
+low-liquidity caveat — needed **zero changes to their assertions**; only
+their `monkeypatch` targets moved from `commodity_forecast.edge_survey.*`
+to `commodity_forecast.markets.wti.*`, since that's where the real code
+being patched now lives. Every one of those assertions still passes
+exactly as before. 7 new tests were added in `tests/test_markets_base.py`,
+exercising `run_family_survey` and `MarketFamily.settle`'s default
+implementation against a tiny, fully-synthetic `MarketFamily` with no
+real forecaster and no network calls at all — confirming the
+market-agnostic loop itself is correct in isolation (an unrelated
+exception still propagates rather than being swallowed as a skip; a
+missing reference price produces `float("nan")`, not a silently-wrong
+`0.0`). Suite grew 138 → 145. **Verified: 145/145 passed**, then
+**independently re-verified via a completely separate fresh clean-room
+clone: 145/145 passed again.**
+
+**A real, live, second Transformer-model persistence snapshot was also
+recorded this run** (not required by the refactor itself, but the
+natural "keep accumulating" instruction from v0.8.0's own "Next run" note
+— and a genuine end-to-end check that the refactored code produces the
+same real behavior against the live API, not just the frozen fixtures).
+Running the new `survey_live_edges()` against the real, live `KXWTI`
+ladder: 135 real open markets, 0 skipped — **every subset again came back
+`n=0` trustworthy**, the identical real cause as the first snapshot
+(recent-window basis mean −6.84 USD/bbl, stdev 3.19 over 10 real paired
+observations, still over the pre-registered `stdev <= 1.0` trust bar — the
+real EIA cache is still anchored at 2026-10-20, so this is not a new
+measurement, just a second honest confirmation of the same one). The raw,
+uncorrected comparison (`trustworthy_only=False`, informational only)
+showed a mean edge of +0.2698 across all 135 markets — consistent with
+the already-documented futures-below-spot basis effect, not a new
+finding. `data/edge_subset_history_transformer.jsonl` now holds 2 real
+entries, both honest `n=0`.
+
+**Not started this run, by design:** the temperature-vs-NWS family itself
+(the actual point of building this interface) is the next run's own
+dedicated slice — see "What's next" below. This run was deliberately
+scoped to the interface + WTI refactor alone, verified and pushed as its
+own complete, tested unit, per this project's "ship in slices" discipline.
+
 ## What's next
 
 1. ~~Try `conformal-forecast`'s existing Adaptive Conformal Inference
@@ -1833,10 +1942,22 @@ next" below.
     the existing WTI code refactored to be that interface's first real
     implementation and `edge.py`'s core kept market-family-agnostic —
     shipped in slices (interface + WTI refactor first, then each new
-    family), each fully tested and pushed before the next. Not started
+    family), each fully tested and pushed before the next. ~~Not started
     this run — this version bump was scoped to the Transformer switch
     alone, so the refactor gets its own dedicated, separately-verified
-    run rather than being rushed in alongside it.
+    run rather than being rushed in alongside it.~~ **Interface + WTI
+    refactor done (v0.9.0, 2026-10-22)** — see "A multi-market framework"
+    above: `markets/base.py` (`MarketFamily`, `ProbabilityEstimate`,
+    `MarketNotScorable`, `run_family_survey`) and `markets/wti.py`
+    (`WTIMarketFamily`, a faithful, test-verified port of the pre-v0.9.0
+    inline logic). **The temperature-vs-NWS family itself is not yet
+    built — that's the next run's own dedicated slice** (a new
+    `markets/temperature.py` implementing `MarketFamily` against a real
+    Kalshi daily-high-temperature series and real NWS point forecasts for
+    the settlement station; the EIA-weekly-storage family stays the
+    second candidate after that). Keep accumulating Transformer-model WTI
+    persistence snapshots on future runs regardless (2 real entries as of
+    v0.9.0) — building the new family doesn't retire the existing one.
 
 ## Running it
 
