@@ -83,6 +83,16 @@ class KalshiMarketQuote:
     volume: float  # volume_fp -- real lifetime contract volume traded, 0.0 if never traded
     open_interest: float  # open_interest_fp -- real open contracts outstanding, 0.0 if none
     result: str  # "" while open; the real settled outcome once status == "finalized"
+    cap_strike: float | None = None
+    # ^ added v0.10.0, for `strike_type in ("less", "between")` markets -- Kalshi's own API
+    # reports both `floor_strike` and `cap_strike` on every market, but every series this
+    # project scored through v0.9.0 (KXWTI) only ever used `strike_type="greater"`
+    # (`floor_strike` set, `cap_strike` always null), so this field was never parsed. The real
+    # `KXHIGH<STATION>` temperature ladder (`markets/temperature.py`) uses all three real
+    # strike shapes Kalshi supports -- "greater" (`floor_strike` only), "less" (`cap_strike`
+    # only), "between" (both) -- confirmed directly against the live API. Defaults to `None`
+    # so every existing call site/fixture that never set it (every WTI test and the WTI family
+    # itself) is unaffected.
 
     @property
     def is_actively_traded(self) -> bool:
@@ -108,6 +118,7 @@ def _parse_market(raw: dict) -> KalshiMarketQuote:
         status=raw.get("status", ""),
         strike_type=raw.get("strike_type", ""),
         floor_strike=(float(raw["floor_strike"]) if raw.get("floor_strike") is not None else None),
+        cap_strike=(float(raw["cap_strike"]) if raw.get("cap_strike") is not None else None),
         close_time=raw.get("close_time", ""),
         yes_bid=float(raw.get("yes_bid_dollars", 0.0)),
         yes_ask=float(raw.get("yes_ask_dollars", 0.0)),
