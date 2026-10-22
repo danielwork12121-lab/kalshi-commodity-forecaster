@@ -107,14 +107,26 @@ commodity_forecast/
                    the spot series used instead of always fetching live --
                    added after a real cache refresh broke three tests that
                    implicitly depended on it; see "Real EIA data resumes"
-                   below
+                   below. (v0.8.0) survey_live_edges gained a model_name
+                   parameter -- default changed from a hardcoded call to
+                   fit_calibrated_naive_forecaster_horizon to
+                   fit_calibrated_forecaster_horizon(model_name="transformer"),
+                   on the strength of v0.7's real, measured
+                   stronger-point-model finding; model_name="naive"
+                   reproduces the exact pre-0.8.0 behavior; see "Switching
+                   the live pipeline to the Transformer point model" below
   edge_persistence.py (since 2026-10-19, continued) append_survey_snapshot
                    / load_survey_history / summarize_persistence -- records
-                   each real edge_survey.py run to data/edge_subset_history.jsonl
+                   each real edge_survey.py run to a JSONL history file
                    and reports, once enough real snapshots exist, whether a
                    subset's edge sign has actually held up over time rather
                    than being single-snapshot noise; see "Tracking
-                   persistence across real snapshots" below
+                   persistence across real snapshots" below. (v0.8.0) the
+                   Transformer-model default's own snapshots are recorded
+                   to a separate file, data/edge_subset_history_transformer.jsonl,
+                   never mixed into the naive series' own
+                   data/edge_subset_history.jsonl -- see "Switching the
+                   live pipeline to the Transformer point model" below
   horizon_model_comparison.py (since 2026-10-21, v0.7)
                    run_horizon_model_comparison / format_horizon_model_comparison
                    -- re-runs the real MAE/coverage/Brier/calibration-error
@@ -161,7 +173,11 @@ tests/
                         (fixtures/wti_spot_daily_through_2026-10-14.csv)
                         instead of the live committed cache, plus a
                         regression test confirming series= really bypasses
-                        fetch_wti_daily
+                        fetch_wti_daily. (v0.8.0) the three frozen-fixture
+                        tests now pin model_name="naive" explicitly (the
+                        live default changed to "transformer"), plus 3 new
+                        tests covering the new default and parameter
+                        validation
   test_edge_persistence.py (since 2026-10-19, continued) append/load
                         roundtrip checks, real-JSONL-file checks, and the
                         "not enough data yet" / sign-consistent /
@@ -181,8 +197,19 @@ data/
                      "Real EIA data resumes" below
   edge_subset_history.jsonl (since 2026-10-19, continued) the real,
                      append-only, forward-only history of edge-subset
-                     survey snapshots -- one real JSON line per real
-                     survey run, never backdated or synthetic
+                     survey snapshots, naive point model -- one real JSON
+                     line per real survey run, never backdated or
+                     synthetic. Frozen as of v0.8.0 (2026-10-21/22): the
+                     live default switched to the Transformer model, so
+                     this file's six real snapshots are the complete naive
+                     series, kept exactly as recorded
+  edge_subset_history_transformer.jsonl (since v0.8.0, 2026-10-22) the
+                     same kind of real, append-only snapshot history, but
+                     for the Transformer-model default -- kept in a
+                     separate file so the two model series are never
+                     conflated into one misleading persistence count; see
+                     "Switching the live pipeline to the Transformer point
+                     model" below
 predictions/
   README.md         explains the forward track record's format and resolution rule
   track_record.jsonl the real, dated predictions themselves (first batch made and
@@ -1356,15 +1383,17 @@ contrast, never meaningfully separates from `naive` at any horizon tested
 — the effect is specific to the Transformer architecture here, not "any
 neural model helps once the horizon is long enough."
 
-**What this does NOT do:** this is a comparison, not a swap — `edge.py`'s
-real, live edge computation (and every number in the "Edge vs. a real
-market price" / persistence-tracking sections above) still uses
-`fit_calibrated_naive_forecaster_horizon` exactly as before. Replacing the
-live pipeline's model choice is a real, separate decision (it would
-change every downstream edge number this project has already
+**What this does NOT do (as of v0.7):** this is a comparison, not a swap —
+`edge.py`'s real, live edge computation (and every number in the "Edge
+vs. a real market price" / persistence-tracking sections above) still
+uses `fit_calibrated_naive_forecaster_horizon` exactly as before.
+Replacing the live pipeline's model choice is a real, separate decision
+(it would change every downstream edge number this project has already
 honestly reported, and deserves its own dedicated re-run and caveat
 discussion, not a silent swap bundled into a comparison feature) — left
-as the natural next step for a future run, not done here.
+as the natural next step for a future run, not done here. **Update
+(v0.8.0, 2026-10-21/22): that decision has now been made — see
+"Switching the live pipeline to the Transformer point model" below.**
 
 5 new tests (129 → 134, all in `tests/test_horizon_model_comparison.py`):
 `model_name="naive"` is confirmed to reproduce
@@ -1516,6 +1545,85 @@ for a documented and traceable reason, less reliable than every prior
 measurement, and the system correctly declined to claim an edge rather
 than report an untrustworthy one.
 
+## Switching the live pipeline to the Transformer point model (v0.8.0, 2026-10-21/22)
+
+v0.7's horizon-model comparison (above) measured, honestly, that the
+Transformer point model has a consistently better MAE than `naive` from
+forecast horizon 3 onward, and a smaller coverage gap (and lower mean
+calibration error) from horizon 10 onward — exactly the horizon range
+most real, live `KXWTI` markets actually close in. That comparison was
+deliberately *not* wired into the live `edge_survey.py` pipeline at the
+time: swapping the model `edge.py`'s own comparison actually uses would
+change every downstream edge number this project reports, and was called
+out as "a real, separate decision" left for later.
+
+That decision is now made. Daniel, live in chat on 2026-10-21, delegated
+engineering decisions on this project (reconfirming his 2026-10-16 "you
+decide everything" stance) and asked specifically for the Transformer
+finding to be acted on. This is a normal engineering decision inside an
+already-measured, already-tested result — not a new, unvalidated claim —
+so it was made without further sign-off, the same way any other
+already-measured model choice would be.
+
+**What changed:** `edge_survey.survey_live_edges` gained a `model_name`
+parameter (default **`"transformer"`**, replacing the previous hardcoded
+call to `fit_calibrated_naive_forecaster_horizon`) and a `seed` parameter
+(default `0`, forwarded to the model constructor). It now calls the more
+general `forecast.fit_calibrated_forecaster_horizon(..., model_name=...)`
+— the same function `horizon_model_comparison.py` already uses — for
+every distinct horizon the live ladder actually needs. Passing
+`model_name="naive"` reproduces the exact pre-0.8.0 behavior; this
+project's own frozen-fixture regression tests
+(`tests/test_edge_survey.py`) now pin `model_name="naive"` explicitly, so
+they keep testing the old, deterministic path rather than silently
+following the new live default. 3 new tests (135 → 138): an unknown
+`model_name` raises; a direct spy confirming the no-argument default
+really calls `fit_calibrated_forecaster_horizon` with
+`model_name="transformer"` (not a silent no-op); and a same-fixture
+naive-vs-transformer comparison confirming the two produce real,
+different `our_probability` values (never byte-identical, which would
+mean the switch wasn't actually taking effect). Full suite verified:
+**138/138 passed.**
+
+**Persistence history is not restarted.** The six existing real snapshots
+in `data/edge_subset_history.jsonl` were all taken with the naive model
+and stay exactly as recorded — none of them is touched, relabeled, or
+reinterpreted. The Transformer model gets its own, separately-labeled
+history file, `data/edge_subset_history_transformer.jsonl`, so the two
+series are never conflated into one misleading "persistence" count.
+
+**The real first Transformer-model snapshot, recorded live on
+2026-10-22:** running the new default against the real, live `KXWTI`
+ladder (135 real open markets, 0 skipped) produced **zero trustworthy
+estimates in every subset** — the same honest "basis not trustworthy
+this run" outcome the sixth naive-model snapshot (v0.7.2, 2026-10-21)
+already hit, and for the identical, model-independent reason:
+`describe_basis_correction`'s own real measurement this run was mean
+−6.84 USD/bbl (futures vs. EIA spot) at stdev 3.19 over 10 real paired
+observations — short of the pre-registered `stdev <= 1.0` trust bar, so
+every market was correctly left uncorrected for the real spot/futures
+basis and flagged with the settlement-benchmark-mismatch caveat (29 of
+the 135 also carried the low-liquidity caveat). This is not a
+Transformer-specific finding — `benchmark.py`'s basis-trust gate runs
+identically regardless of which point model scores the probability side
+of the comparison — but it does mean this first Transformer snapshot adds
+no real sign-consistency information yet, the same honest "n=0" outcome
+the naive series' own sixth snapshot already reported. The raw,
+uncorrected comparison (`trustworthy_only=False`, informational only,
+never used for a persistence verdict) showed a mean edge of +0.27 across
+all 135 markets — consistent with the known, already-documented futures-
+below-spot basis effect this project has reported since 2026-10-16, not
+evidence of a new real edge. **The real next step is simply: keep running
+this survey on future scheduled runs, the same discipline that built the
+naive series' own six-snapshot history, until either the basis-trust gate
+passes again or enough Transformer-model snapshots accumulate to say
+something honest about persistence.**
+
+**Not yet started this run:** the multi-market framework (temperature-vs-
+NWS, EIA weekly storage) named alongside this decision is a separate,
+larger slice of work, not bundled into this version bump — see "What's
+next" below.
+
 ## What's next
 
 1. ~~Try `conformal-forecast`'s existing Adaptive Conformal Inference
@@ -1639,12 +1747,12 @@ than report an untrustworthy one.
    above. Real, genuinely different answer from the horizon=1 check: a
    Transformer model shows a real, growing MAE and coverage-gap
    improvement over `naive` starting around horizon=3, reaching a ~2.3%
-   MAE reduction and a meaningfully smaller coverage gap by horizon=21 —
-   not implemented in the live `edge.py` pipeline yet (a model swap there
-   is a separate decision, deliberately left undone this run — see that
-   section's own "What this does NOT do" note), but the live pipeline's
-   `NaiveForecaster` choice is no longer unexamined at the horizons that
-   matter.
+   MAE reduction and a meaningfully smaller coverage gap by horizon=21.
+   ~~Wire the Transformer model into the live edge_survey.py pipeline~~
+   **Done (v0.8.0, 2026-10-21/22)** — see "Switching the live pipeline to
+   the Transformer point model" above. The live default is now
+   `model_name="transformer"`; the naive path stays available (and is
+   what the frozen-fixture tests pin) via an explicit parameter.
 8. ~~Repeat the edge-subset survey on successive runs and check whether any
    one subset's edge sign/magnitude actually holds up over multiple real
    snapshots, which is the only way a *persistent* (not just
@@ -1702,12 +1810,33 @@ than report an untrustworthy one.
    (2026-10-21, v0.7.2)** — see "Real EIA data resumes after a week-plus
    gap" above: the second batch resolved (all 3 "exceeded"), a third
    batch was made, and the sixth snapshot was recorded (see item 8). A
-   real, separate decision surfaced in the same run and is still open,
-   needing Daniel's own call rather than a unilateral pick: whether/when
-   to wire v0.7.0's Transformer-model finding (a real, growing MAE/coverage
-   advantage from horizon 3 onward) into the live `edge.py` pipeline —
-   doing so would change every downstream edge number and the persistence
-   history's own basis.
+   real, separate decision surfaced in the same run — whether/when to
+   wire v0.7.0's Transformer-model finding into the live `edge.py`
+   pipeline — was **made (GO) 2026-10-21, live in chat, and shipped as
+   v0.8.0** — see "Switching the live pipeline to the Transformer point
+   model" above.
+10. **(New, v0.8.0) Broaden the edge hunt beyond the WTI ladder, to market
+    families where a real, public-data-driven edge is more plausible.**
+    Six real naive-model snapshots (and now a first Transformer-model
+    one) all agree the WTI ladder shows no trustworthy edge once the
+    settlement-benchmark and liquidity caveats are honestly applied —
+    re-measuring the same market indefinitely is not the same as making
+    progress. Decided 2026-10-21 (live chat, same session as the
+    Transformer go-ahead): grow into a genuine multi-market framework
+    rather than a single-series tool. First candidate: Kalshi daily
+    high-temperature markets vs. real NWS point forecasts for the
+    settlement station (the same public-forecast-vs-market premise, never
+    a real trade). Second candidate: EIA weekly storage/inventory-report
+    markets vs. the real analyst-consensus/surprise distribution. Sketch:
+    a `markets/` package exposing one common interface per family
+    (`list_open_markets()` / `estimate_probability()` / `settle()`), with
+    the existing WTI code refactored to be that interface's first real
+    implementation and `edge.py`'s core kept market-family-agnostic —
+    shipped in slices (interface + WTI refactor first, then each new
+    family), each fully tested and pushed before the next. Not started
+    this run — this version bump was scoped to the Transformer switch
+    alone, so the refactor gets its own dedicated, separately-verified
+    run rather than being rushed in alongside it.
 
 ## Running it
 
