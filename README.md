@@ -65,7 +65,11 @@ commodity_forecast/
   kalshi_client.py (since 2026-10-16) real, public, unauthenticated Kalshi
                    market-data client (series/markets/orderbook), with real
                    retry/backoff on the real rate limiting this project
-                   independently confirmed while building it
+                   independently confirmed while building it. (v0.10.0)
+                   gained `cap_strike` for `"less"`/`"between"` ladders.
+                   (v0.11.0) gained `expiration_value`, the most direct
+                   real settlement-value exposure of the three families
+                   built so far -- see "The crude storage family" below
   edge.py          (since 2026-10-16) compares this project's own
                    calibrated probability against a real, live Kalshi
                    market's own implied probability, with explicit,
@@ -108,11 +112,23 @@ commodity_forecast/
                    live KXHIGH<STATION> daily-high-temperature ladder via
                    a real climatological empirical distribution rather
                    than an autoregressive point forecast -- see "The
-                   temperature family" below
+                   temperature family" below. (new, v0.11.0)
+                   crude_storage.py is CrudeStorageMarketFamily, this
+                   framework's third real family, scoring the real,
+                   live KXEIACRUDEW weekly EIA crude-storage ladder
+                   against Kalshi's own direct `expiration_value`
+                   settlement field -- see "The crude storage family"
+                   below
   temperature_data.py (new, v0.10.0) real historical NYC daily-max-
                    temperature data from Open-Meteo's free, public
                    archive API, cached locally the same way data.py
                    caches EIA spot prices
+  crude_storage_data.py (new, v0.11.0) real historical EIA weekly U.S.
+                   crude-oil-in-storage data (EIA series `WCESTUS1`),
+                   fetched directly from EIA's own spreadsheet download,
+                   restricted to the consistently-weekly era
+                   (1983-06-10 onward) and cached locally the same way
+                   data.py and temperature_data.py cache their own series
   edge_survey.py   (since 2026-10-19) survey_live_edges + summarize_edge_subsets
                    -- runs the real edge.py pipeline across every real
                    open market on a series in one call, instead of one
@@ -173,7 +189,10 @@ tests/
   test_kalshi_client.py (since 2026-10-16) parses real captured Kalshi API
                         responses (tests/fixtures/), checks real 429
                         retry/backoff, plus one live integration test
-                        against the real production API
+                        against the real production API. (v0.10.0) plus
+                        real `cap_strike` parsing tests; (v0.11.0) plus
+                        real `expiration_value` parsing tests against a
+                        real captured settled `KXEIACRUDEW` fixture
   test_edge.py          (since 2026-10-16) hand-computed Kelly-sizing
                         checks, honesty-caveat checks, paper-bet
                         append/load/resolve round-trips, and (since
@@ -220,6 +239,19 @@ tests/
                         unrelated exception still propagating, a missing
                         reference price producing NaN rather than a
                         silent 0.0) is correct independent of WTI
+  test_crude_storage_data.py (new, v0.11.0) date-math unit test, a real
+                        live EIA integration test, cache-hit/refresh
+                        tests, and a too-few-rows DataFetchError guard
+                        test -- same shape as test_data.py /
+                        test_temperature_data.py
+  test_markets_crude_storage.py (new, v0.11.0) real-fixture parsing
+                        tests for the real 3-format `expiration_value`
+                        quirk and the `"week ending ..."` title regex,
+                        real basis-measurement/trust-gate checks (pinned
+                        to the real measured mean=-0.009/stdev=0.018/n=8
+                        result), frozen-series exact-probability tests,
+                        and a real live end-to-end integration test
+                        against the actual `KXEIACRUDEW` ladder
 data/
   wti_spot_daily.csv real cached WTI daily spot price series, 1986-01-02 to
                      present. Never hand-edited -- a refresh overwrites it
@@ -245,6 +277,17 @@ data/
                      model" below. Two real entries as of v0.9.0, both
                      honest n=0 (the basis-trust gate failing both times
                      for the same model-independent reason)
+  crude_storage_weekly.csv (new, v0.11.0) real cached EIA WCESTUS1 weekly
+                     U.S. crude-oil-in-storage series, 1983-06-10 to
+                     present (million barrels). Never hand-edited -- a
+                     refresh overwrites it with the real series as of
+                     that moment
+  edge_subset_history_crude_storage.jsonl (new, v0.11.0) the first real
+                     snapshot history for the crude-storage family -- one
+                     real JSON line per real survey run, same append-only
+                     discipline as the other two families' history files.
+                     One real entry as of v0.11.0 (too few snapshots yet
+                     for a persistence verdict)
 predictions/
   README.md         explains the forward track record's format and resolution rule
   track_record.jsonl the real, dated predictions themselves (first batch made and
@@ -1866,6 +1909,117 @@ through v0.9.0 (`KXWTI`) only ever used `strike_type="greater"`, so
 for `"less"`/`"between"` markets. The default keeps every existing WTI
 test/fixture unaffected.
 
+## The crude storage family: `KXEIACRUDEW` vs. a real cleaner settlement benchmark (v0.11.0, 2026-10-22)
+
+This framework's third real market family, `CrudeStorageMarketFamily`,
+scores Kalshi's real, live `KXEIACRUDEW` weekly series — "will the EIA's
+weekly U.S. crude-oil-in-storage report come in greater than X million
+barrels" — against this project's own forecast of the real EIA `WCESTUS1`
+series (U.S. ending stocks of crude oil, excluding the SPR).
+
+**Why this family.** WTI needed a *reconstructed* futures-settlement
+benchmark (no public feed for ICE's actual settlement price —
+`benchmark.py`'s whole job). Temperature needed real settled brackets
+pieced back together the same way. `KXEIACRUDEW` is different: Kalshi's
+own market objects carry an `expiration_value` field that is the real
+EIA-reported storage figure itself, directly — no bracket reconstruction,
+no indirect benchmark. This is the cleanest settlement-verification case
+this project has built so far, and it was this run's top-priority next
+step per the standing project direction.
+
+**A real, disclosed metadata quirk: three `expiration_value` formats.**
+A debug pass over all 8 real settled `KXEIACRUDEW` events this run turned
+up three distinct real formats for the same field: `"412.5M"` (one
+event), `"415.6"` (no suffix, six events), and `"424069"` (one event, raw
+thousand-barrels, no `M` and no decimal point). `parse_expiration_value_million_bbl`
+handles all three: a trailing `M` is stripped and the number used as-is;
+a bare number is used as-is *unless* it exceeds a plausibility ceiling
+(`_PLAUSIBLE_MILLION_BBL_CEILING = 10_000.0`, since U.S. crude storage has
+never been within an order of magnitude of that many million barrels), in
+which case it's treated as raw thousand-barrels and divided by 1000. All 8
+real events parse correctly under this rule, independently cross-checked
+against this project's own cached `WCESTUS1` series (differences all
+within ~0.0–0.03 million barrels — consistent with ordinary measurement
+noise, not a parsing bug).
+
+**A real, disclosed design decision: `days_to_close` measured against the
+target week, not `close_time`.** Every real settled event checked this run
+showed a consistent ~5–6 real calendar-day lag between a market's own
+`close_time` and the actual EIA-report week-ending date its title names
+(EIA publishes roughly 5–6 days after the week it's reporting on). Using
+`close_time` directly made every single real open market fail the
+generic forecast-horizon-mismatch caveat in `edge.py` (`days_to_close`
+~12 real days out vs. this family's own validated 7-day horizon), which
+would have made the whole family permanently untrustworthy by
+construction — not a real finding, just a benchmark-choice artifact.
+`estimate_probability` instead computes `days_to_close` as the real
+distance from the last observed data point to the market's *target* week,
+which is what this project's own forecast horizon actually measures
+against. This is disclosed in the module's own docstring as a considered
+design decision, not a silent fix used to force a cleaner number — the
+same honesty standard as every other caveat/threshold choice in this
+project.
+
+**Real basis correction result — the first to clear the trust bar out of
+the box.** `measure_crude_storage_basis` pairs each real settled event's
+`expiration_value` against this project's own cached `WCESTUS1` series for
+the same target week:
+
+```
+mean = -0.0094 million bbl   stdev = 0.018   n = 8   trustworthy = True
+```
+
+This is the first of the three families whose basis correction passes
+`describe_basis_correction`'s trust gate (`stdev <= 1.0`, `n >= 5`)
+without qualification — unsurprising given `expiration_value` is a direct
+settlement readout rather than a reconstructed one, but still the first
+real confirmation of that expectation.
+
+**The real, live first snapshot (2026-10-22).** `CrudeStorageMarketFamily`
+against the real, live, open `KXEIACRUDEW` ladder: **13 real open markets,
+0 skipped.** Because the basis correction is trustworthy, the
+`trustworthy_only=True` subset summary carries real signal this time
+(not an automatic `n=0`): the `all` subset came back **n=3, mean edge
+= +0.0068** — real, small, and well within noise for n=3, reported
+honestly as inconclusive rather than framed as a finding. Recorded as
+this family's first real entry in the new
+`data/edge_subset_history_crude_storage.jsonl` (too few snapshots yet for
+`summarize_persistence` to render a verdict — `MIN_SNAPSHOTS_FOR_A_PERSISTENCE_VERDICT = 3`).
+
+**A real, disclosed remaining caveat.** `WCESTUS1`'s cached series reflects
+whatever the EIA currently publishes for each week, which can include
+later revisions to a figure first published weeks earlier; this family's
+basis measurement and forecast both use the currently-cached (possibly
+revised) value, not the figure as it was first published at the time a
+now-settled market actually closed. This is the same category of caveat
+WTI's own spot-vs-futures basis correction carries (a real, structural
+limit of the benchmark data available, not a bug), and is left for a
+future run to address if it turns out to matter in practice.
+
+**A real, small, backward-compatible change to `kalshi_client.py`:**
+`KalshiMarketQuote` gained an `expiration_value: str | None = None` field
+(and `_parse_market` now reads it), mirroring the `cap_strike` precedent
+from v0.10.0. The default keeps every existing WTI/temperature
+test/fixture unaffected.
+
+**Tests: 28 new (182 → 210).** `tests/test_crude_storage_data.py`
+(date-math unit test against a known reference, a real live EIA
+integration test — 2,263 real rows, 1983-06-10 to 2026-10-16, spot-checked
+against a known real value — cache-hit/refresh tests, and a
+too-few-rows `DataFetchError` guard test). `tests/test_markets_crude_storage.py`
+(title-parsing for the real `"week ending ..."` format; all three real
+`expiration_value` formats plus invalid input; `fetch_real_settled_values`
+and `measure_crude_storage_basis` against a real captured settled fixture;
+the trust-gate boundary pinned to this run's own real measured result;
+`CrudeStorageMarketFamily.estimate_probability` exercised end-to-end with
+a frozen, deterministic synthetic series for exact expected probabilities
+and for a synthetic trustworthy-basis-correction case; and a real, live
+end-to-end integration test against the actual `KXEIACRUDEW` ladder). Plus
+2 new tests in `tests/test_kalshi_client.py` for the new `expiration_value`
+field (real captured fixture,
+`tests/fixtures/kxeiacrudew_markets_settled_live_2026-10-22.json`).
+**Verified 210/210 passed.**
+
 ## What's next
 
 1. ~~Try `conformal-forecast`'s existing Adaptive Conformal Inference
@@ -2093,10 +2247,16 @@ test/fixture unaffected.
     against that real benchmark, handling all three real strike shapes.
     The real basis correction didn't clear this project's own trust bar
     this run — reported honestly, same as WTI's own early snapshots.
-    EIA-weekly-storage stays the next market-family candidate. Keep
-    accumulating both WTI Transformer-model and temperature-family
-    persistence snapshots on future runs regardless — building one family
-    doesn't retire another.
+    ~~EIA-weekly-storage stays the next market-family candidate.~~
+    **Done (v0.11.0, 2026-10-22)** — see "The crude storage family"
+    above: `markets/crude_storage.py`'s `CrudeStorageMarketFamily` scores
+    the real, live `KXEIACRUDEW` weekly ladder directly against Kalshi's
+    own `expiration_value` settlement field — the cleanest
+    settlement-verification case built so far, and the first family
+    whose basis correction clears this project's own trust bar out of the
+    box. Keep accumulating WTI Transformer-model, temperature-family, and
+    now crude-storage-family persistence snapshots on future runs
+    regardless — building one family doesn't retire another.
 11. **(New, v0.10.0) Keep accumulating real temperature-family snapshots,
     and watch whether the basis correction's own trust gate ever clears.**
     One real live snapshot and one real 23-point basis measurement is an
@@ -2113,10 +2273,39 @@ test/fixture unaffected.
     real station (`KXHIGHCHI`, `KXHIGHLAX`, `KXHIGHAUS`, `KXHIGHMIA` are
     all real, currently open) once `KXHIGHNY` itself has a few more real
     snapshots, to see whether the basis/calibration findings are
-    NYC-specific or general; (d) the EIA-weekly-storage family remains the
-    next genuinely *new* market family to build, after the temperature
-    family has had a chance to accumulate real persistence data rather
-    than being abandoned after one snapshot.
+    NYC-specific or general; ~~(d) the EIA-weekly-storage family remains
+    the next genuinely *new* market family to build, after the
+    temperature family has had a chance to accumulate real persistence
+    data rather than being abandoned after one snapshot.~~ **Done
+    (v0.11.0, 2026-10-22)** — see item 12 below for where that family
+    goes from here.
+12. **(New, v0.11.0) Keep accumulating real crude-storage-family
+    snapshots, and get a genuine edge-subset/persistence read with more
+    than one data point.** One real live snapshot (13 markets, 3
+    trustworthy, mean edge +0.0068) is, honestly, less than the bare
+    minimum `edge_persistence.py` itself requires for any verdict
+    (`MIN_SNAPSHOTS_FOR_A_PERSISTENCE_VERDICT = 3`) — concretely: (a)
+    keep recording real `edge_subset_history_crude_storage.jsonl`
+    snapshots on future runs until a real sign-consistency verdict
+    becomes possible, the same discipline already applied to the other
+    two families; (b) re-check the real basis correction
+    (currently mean=-0.0094, stdev=0.018, n=8 — already trustworthy, but
+    only 8 real settled events deep) as more real settlements accumulate,
+    watching specifically whether the `KXEIACRUDEW` series ever rolls
+    onto a materially different contract/rules shape the way `KXWTI`'s
+    own basis needed re-checking for; (c) investigate the disclosed
+    first-published-vs-currently-cached EIA revision caveat noted above —
+    whether it actually moves the basis or edge measurement in practice,
+    or is (like WTI's own analogous caveat) a real but practically small
+    effect; (d) consider whether a stronger point model
+    (`model_name="transformer"`, already validated for WTI at this
+    project's horizon-model-comparison step) is worth trying for this
+    family too, once enough real snapshots exist to judge whether model
+    choice matters here the way it did for WTI; (e) a natural further EIA
+    series once crude storage has had its own chance to accumulate real
+    persistence data: EIA also publishes weekly natural-gas storage
+    (`WNGSUS2`-style data) — a plausible fourth market family, not started
+    this run, kept here as an idea rather than acted on prematurely.
 
 ## Running it
 
