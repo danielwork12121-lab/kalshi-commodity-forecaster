@@ -194,3 +194,52 @@ def test_fetch_series_real_live_kxwti_settlement_source():
     series = fetch_series("KXWTI", max_retries=6, initial_backoff=3.0)
     assert series["ticker"] == "KXWTI"
     assert series["settlement_sources"][0]["name"] == "ICE"
+
+
+def test_parse_market_captures_cap_strike_for_less_and_between_markets():
+    """v0.10.0: `cap_strike` (added for the real `KXHIGH<STATION>`
+    temperature ladder, which -- unlike `KXWTI`'s own real ladder -- uses
+    `"less"` and `"between"` strike shapes, not just `"greater"`) against a
+    real captured `KXHIGHNY` response (tests/fixtures/
+    kxhighny_markets_live_2026-10-22.json, a byte-for-byte real API
+    capture, same discipline as the existing `KXWTI` fixture test above)."""
+    raw = _load_fixture("kxhighny_markets_live_2026-10-22.json")
+    quotes = {m["ticker"]: _parse_market(m) for m in raw["markets"]}
+
+    greater = quotes["KXHIGHNY-26OCT23-T64"]
+    assert greater.strike_type == "greater"
+    assert greater.floor_strike == pytest.approx(64.0)
+    assert greater.cap_strike is None
+
+    less = quotes["KXHIGHNY-26OCT23-T57"]
+    assert less.strike_type == "less"
+    assert less.floor_strike is None
+    assert less.cap_strike == pytest.approx(57.0)
+
+    between = quotes["KXHIGHNY-26OCT23-B63.5"]
+    assert between.strike_type == "between"
+    assert between.floor_strike == pytest.approx(63.0)
+    assert between.cap_strike == pytest.approx(64.0)
+
+
+def test_kalshi_market_quote_defaults_cap_strike_to_none_for_existing_call_sites():
+    """Every pre-v0.10.0 call site (every WTI test/fixture) constructs
+    `KalshiMarketQuote` without `cap_strike` -- confirms the new field's
+    default keeps those unaffected."""
+    quote = KalshiMarketQuote(
+        ticker="T",
+        event_ticker="E",
+        title="t",
+        status="active",
+        strike_type="greater",
+        floor_strike=100.0,
+        close_time="2026-11-01T00:00:00Z",
+        yes_bid=0.4,
+        yes_ask=0.6,
+        no_bid=0.4,
+        no_ask=0.6,
+        volume=0.0,
+        open_interest=0.0,
+        result="",
+    )
+    assert quote.cap_strike is None
