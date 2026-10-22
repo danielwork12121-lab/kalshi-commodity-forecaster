@@ -4,4 +4,4 @@ Built on top of conformal-forecast (https://github.com/danielwork12121-lab/confo
 reusing its split-conformal-prediction forecasters rather than reimplementing forecasting logic.
 """
 
-__version__ = "0.11.0"
+__version__ = "0.12.0"
