@@ -56,7 +56,7 @@ from commodity_forecast.edge import (
     days_to_close_from_last_observation,
     pick_validated_horizon,
 )
-from commodity_forecast.forecast import fit_calibrated_naive_forecaster_horizon
+from commodity_forecast.forecast import MODEL_NAMES, fit_calibrated_forecaster_horizon
 from commodity_forecast.kalshi_client import fetch_markets
 from commodity_forecast.probability import exceedance_probability
 
@@ -83,6 +83,8 @@ def survey_live_edges(
     min_volume_for_trust: float = 1.0,
     refresh_spot: bool = False,
     series=None,
+    model_name: str = "transformer",
+    seed: int = 0,
 ) -> tuple[list[SurveyedEdge], list[str]]:
     """Real cross-sectional edge survey across every real, currently-open
     market in `series_ticker`. See the module docstring for the honest
@@ -101,15 +103,37 @@ def survey_live_edges(
     "Edge-subset survey" section and Known issue tracking in
     `active-project-kalshi.md` for the full account.)
 
+    `model_name` (v0.8.0, default changed from the naive-only hardcoded
+    path to `"transformer"`): which of `forecast.MODEL_NAMES` to fit via
+    `fit_calibrated_forecaster_horizon` for every horizon this ladder
+    actually needs. Changed from always-naive to transformer-by-default
+    per the 2026-10-21 live-chat direction update, on the strength of
+    v0.7.0's real, measured finding that the Transformer point model has a
+    consistently better MAE and a smaller coverage gap than naive from
+    horizon 3 onward (see the README's "Does a stronger point model help
+    at the horizon markets actually need?" section) -- this is a real
+    engineering decision about which already-validated model the live
+    pipeline should use, not a new, unvalidated claim. Pass
+    `model_name="naive"` to reproduce the exact pre-0.8.0 behavior (used by
+    this project's own frozen-fixture regression tests, which intentionally
+    pin the old naive-model numbers rather than silently following the
+    default forward). `seed` is forwarded to the model constructor for
+    `"lstm"`/`"transformer"` (unused by `"naive"`, which has no randomness)
+    -- a fixed default so a live run's own result is reproducible given the
+    same input series.
+
     Returns `(surveyed, skipped)`: `surveyed` holds one `SurveyedEdge` per
     real open market this project could honestly score; `skipped` holds a
     plain-English reason string for each real open market it could NOT
     score (never silently dropped). Fits at most one horizon-validated
     forecaster per distinct real horizon the live ladder actually needs
     (never refit per-market), via the same already-tested
-    `fit_calibrated_naive_forecaster_horizon` the Horizon-caveat resolution
+    `fit_calibrated_forecaster_horizon` the horizon-model comparison (v0.7)
     already validated.
     """
+    if model_name not in MODEL_NAMES:
+        raise ValueError(f"Unknown model_name {model_name!r}; must be one of {MODEL_NAMES}")
+
     quotes = fetch_markets(series_ticker, status="open")
     if series is None:
         series = fetch_wti_daily(refresh=refresh_spot)
@@ -156,8 +180,8 @@ def survey_live_edges(
             continue
 
         if horizon not in fitted_by_horizon:
-            fitted_by_horizon[horizon] = fit_calibrated_naive_forecaster_horizon(
-                series.values, horizon=horizon, lookback=lookback, alpha=alpha
+            fitted_by_horizon[horizon] = fit_calibrated_forecaster_horizon(
+                series.values, horizon=horizon, model_name=model_name, lookback=lookback, alpha=alpha, seed=seed
             )
         result = fitted_by_horizon[horizon]
 
