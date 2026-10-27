@@ -169,3 +169,91 @@ def test_settle_default_implementation_delegates_to_the_real_kalshi_client(monke
 
     assert seen_tickers == ["TOY-TO-SETTLE"]
     assert result.volume == 999.0
+
+
+class _FlakyEmptyFamily(MarketFamily):
+    """A synthetic family whose `list_open_markets()` returns a scripted
+    sequence of results across successive calls -- used only to exercise
+    `run_family_survey`'s 2026-10-27 empty-result retry safety net
+    (real motivation: a same-session read-only re-check found 135 real
+    open WTI-transformer markets and 12 real open Miami-temperature
+    markets moments after a live scheduled run's own survey had recorded
+    zero for both -- a real, transient empty-response blip, not a true
+    "no markets open" state)."""
+
+    series_ticker = "TOY"
+
+    def __init__(self, results):
+        self._results = list(results)
+        self.call_count = 0
+
+    def list_open_markets(self):
+        self.call_count += 1
+        if self.call_count <= len(self._results):
+            return self._results[self.call_count - 1]
+        return self._results[-1] if self._results else []
+
+    def estimate_probability(self, market):
+        return ProbabilityEstimate(
+            our_probability=0.7,
+            adjusted_strike=market.floor_strike,
+            settlement_benchmark_matches_forecast=True,
+            forecast_horizon_days=3,
+            days_to_close=2.0,
+            reference_price=95.0,
+        )
+
+
+def test_run_family_survey_retries_once_on_a_transient_empty_result_and_recovers(monkeypatch):
+    """A first fetch that comes back empty should not be trusted outright
+    -- exactly one retry should run, and a real result on that retry
+    should be used rather than the spurious empty one."""
+    monkeypatch.setattr("commodity_forecast.markets.base.time.sleep", lambda _seconds: None)
+
+    real_quotes = [_quote("TOY-REAL-1"), _quote("TOY-REAL-2", floor_strike=120.0)]
+    family = _FlakyEmptyFamily([[], real_quotes])
+
+    surveyed, skipped = run_family_survey(family, empty_retry_delay=0.0)
+
+    assert family.call_count == 2
+    assert skipped == []
+    assert [s.estimate.kalshi_ticker for s in surveyed] == ["TOY-REAL-1", "TOY-REAL-2"]
+
+
+def test_run_family_survey_accepts_a_persistently_empty_result_after_one_retry():
+    """When the series genuinely has no open markets, the retry should
+    also come back empty, and `run_family_survey` should accept that as
+    the real answer rather than retrying forever."""
+    family = _FlakyEmptyFamily([[], []])
+
+    surveyed, skipped = run_family_survey(family, empty_retry_delay=0.0)
+
+    assert family.call_count == 2  # the initial call plus exactly one retry, no more
+    assert surveyed == []
+    assert skipped == []
+
+
+def test_run_family_survey_retry_if_empty_false_disables_the_safety_net():
+    """The default is on, but a caller who explicitly wants the old,
+    no-retry behavior (e.g. a fast unit test, or a context where a retry
+    delay is unwelcome) can still get it."""
+    family = _FlakyEmptyFamily([[], [_quote("TOY-WOULD-HAVE-BEEN-FOUND")]])
+
+    surveyed, skipped = run_family_survey(family, retry_if_empty=False)
+
+    assert family.call_count == 1  # no retry attempted
+    assert surveyed == []
+    assert skipped == []
+
+
+def test_run_family_survey_does_not_retry_when_the_first_result_is_already_non_empty():
+    """The retry path must only fire on a genuinely empty first result --
+    a family that already returned real markets should never see a second
+    `list_open_markets()` call."""
+    family = _FlakyEmptyFamily([[_quote("TOY-ALREADY-REAL")]])
+
+    surveyed, skipped = run_family_survey(family, empty_retry_delay=0.0)
+
+    assert family.call_count == 1
+    assert len(surveyed) == 1
+    assert skipped == []

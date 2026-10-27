@@ -45,6 +45,7 @@ own docstring), and builds the same `SurveyedEdge` list
 
 from __future__ import annotations
 
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
@@ -166,6 +167,8 @@ class SurveyedEdge:
 def run_family_survey(
     family: MarketFamily,
     min_volume_for_trust: float = 1.0,
+    retry_if_empty: bool = True,
+    empty_retry_delay: float = 2.0,
 ) -> tuple[list[SurveyedEdge], list[str]]:
     """The market-agnostic survey loop every `MarketFamily` shares: fetch
     `family`'s own real open markets, ask the family to score each one,
@@ -176,11 +179,35 @@ def run_family_survey(
     recorded in `skipped` with a plain-English reason (`"{ticker}: {reason}"`)
     and never raises out of this function; any other exception is a real
     bug in the family's own code and is allowed to propagate.
+
+    `retry_if_empty` (new 2026-10-27): a real, observed Kalshi-API behavior
+    -- `list_open_markets()` can come back with a genuinely empty list on a
+    transient basis, for a series that normally has dozens of open markets,
+    via a real `200 OK` with an empty `markets` array rather than an HTTP
+    429/5xx `kalshi_client._get_json` would already retry on its own. This
+    was first caught on 2026-10-27 when a scheduled run's real survey
+    recorded zero open WTI-transformer and zero open Miami-temperature
+    markets, and a same-session read-only re-check moments later found 135
+    and 12 real open markets respectively -- the live data was there the
+    whole time, the first fetch just came back empty. When `retry_if_empty`
+    is true (the default), an initial empty result triggers exactly one
+    retry after `empty_retry_delay` seconds before being accepted; a
+    genuinely-empty series still comes back empty on the retry and nothing
+    about the returned `(surveyed, skipped)` changes, so this is a no-op
+    safety net when zero really is correct and a real bug fix when it
+    isn't. It does not retry a non-empty result, and it does not retry
+    more than once -- this guards against a single transient empty blip,
+    not a sustained real outage.
     """
     surveyed: list[SurveyedEdge] = []
     skipped: list[str] = []
 
-    for market in family.list_open_markets():
+    open_markets = family.list_open_markets()
+    if retry_if_empty and not open_markets:
+        time.sleep(empty_retry_delay)
+        open_markets = family.list_open_markets()
+
+    for market in open_markets:
         try:
             pe = family.estimate_probability(market)
         except MarketNotScorable as exc:

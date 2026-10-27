@@ -2154,6 +2154,79 @@ and `test_family_passes_the_real_station_label_for_its_own_basis_note`
 (the regression test for the station-label bug). **Verified 216/216
 passed.**
 
+## A suspected data-fetch bug investigated and ruled out, a defensive retry added anyway, and a real crude-storage liquidity-composition finding explained (v0.13.0, 2026-10-27)
+
+**The suspected bug.** A routine scheduled survey run recorded the usual
+"all" subset as `n=0` for the WTI/transformer and Miami-temperature
+families, and a same-session read-only re-check (`run_family_survey`
+called directly, no mutation) found 135 real open WTI markets and 12 real
+open Miami markets moments later — looking, at first glance, like a
+transient empty-response glitch from Kalshi's own `/markets` endpoint that
+had silently corrupted this run's own persistence-history entry for both
+families.
+
+**Investigated before being reported, and the real explanation is more
+mundane (and already known) than a fetch bug.** `summarize_edge_subsets`'s
+`"all"` subset is not "every market this family fetched" — per its own
+docstring, it's every *trustworthy* estimate (`trustworthy_only=True` by
+default). Checking every one of this project's own historical snapshots
+confirms `"all"` has read exactly `n=0` for **every single one** of 20
+real transformer snapshots and 17 real Miami snapshots recorded since
+2026-10-22 — not something that started this run. That is exactly what
+this project's own already-published honest conclusions predict: "no part
+of this project's analysis supports a trustworthy profitable signal on
+the WTI ladder under either point model," and Miami's own basis
+correction has never yet crossed this project's trust bar. Real markets
+were almost certainly being fetched and scored the whole time; they were
+just being correctly filtered out of `"all"` as untrustworthy, the same
+as every prior snapshot — not evidence of a broken fetch. **No historical
+persistence-history entry is believed to be wrong, and none was altered.**
+
+**A real, separate hardening was still worth making.** `kalshi_client._get_json`
+already retries on HTTP 429/5xx, but nothing previously guarded against
+the different, rarer failure mode of a real `200 OK` response carrying a
+genuinely empty `markets` array for a series that normally has many open
+markets — a case this project has not yet confirmed actually happening,
+but has no defense against if it ever does, since a resulting `n=0` entry
+would look identical to a real "no open markets" or "nothing trustworthy"
+reading in the persistence history, with no way to tell them apart after
+the fact. `run_family_survey` (`commodity_forecast/markets/base.py`) now
+takes `retry_if_empty: bool = True, empty_retry_delay: float = 2.0`: when
+the first `list_open_markets()` call comes back empty, it waits once and
+retries before accepting the result. A genuinely-empty series still comes
+back empty on the retry (no behavior change); the only case this changes
+anything is a real transient blip. **4 new tests (216 → 220)**:
+`test_run_family_survey_retries_once_on_a_transient_empty_result_and_recovers`,
+`test_run_family_survey_accepts_a_persistently_empty_result_after_one_retry`,
+`test_run_family_survey_retry_if_empty_false_disables_the_safety_net`,
+`test_run_family_survey_does_not_retry_when_the_first_result_is_already_non_empty`
+— all against a synthetic `_FlakyEmptyFamily` fixture, no real network
+calls. **Verified 220/220 passed.**
+
+**A second, real, investigated finding this run: crude storage's
+persistence-history sign flipped** (`all`/`liquid`, n=5: `+0.0181` on the
+prior snapshot → `-0.0159` on this one) **— explained by a liquidity-
+composition effect, not a reversal of the per-strike edge pattern.** A
+read-only diagnostic (`run_family_survey` against a freshly-constructed
+`CrudeStorageMarketFamily`, confirmed non-mutating via `git diff --stat`)
+found the same weekly contract (`26OCT28`, no rollover this time) and the
+same 13 total markets as before, but a *different* 5 strikes happened to
+carry nonzero volume at this exact survey instant — `"liquid"` is a
+real-time `market_volume > 0` filter (`edge_survey.py`), not a fixed set
+of strikes, so which specific strikes count as "liquid" can and does
+shift between surveys even within one unchanged contract cycle. The 13
+strikes' individual edges this run form a consistent pattern by moneyness
+(roughly: edge trends negative at strikes above the settlement estimate,
+positive below it, near zero close to it) — this run's 5 liquid strikes
+happened to skew toward the negative side, the prior run's apparently
+skewed toward the positive side. **This is the same category of
+mechanical artifact as the already-documented weekly contract-cycle
+rollover and the NYC daily moneyness rollover — a real, observed change
+with a real, benign mechanical explanation, not a reversal of the
+underlying per-strike edge pattern — and is reported as such, not as a
+headline "the edge flipped" finding.** Process note added below.
+
+
 ## What's next
 
 1. ~~Try `conformal-forecast`'s existing Adaptive Conformal Inference
