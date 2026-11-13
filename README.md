@@ -168,6 +168,22 @@ The `MarketFamily` interface (`list_open_markets`, `estimate_probability`, `sett
 - 0.10-0.12: temperature (NYC, Miami) and crude-storage families; per-station cache fix.
 - 0.13: empty-response retry in `run_family_survey`.
 
+## How this was built
+
+This project was built with substantial AI assistance. Almost every commit here
+carries a `Co-Authored-By: Claude` trailer, and much of the history was produced
+by a scheduled coding agent running on a roughly two-hour cadence — which is why
+the commit log reads the way it does. That is accurate, and the trailers were
+left in deliberately rather than squashed out.
+
+It would be incoherent to publish a repository whose entire argument is that you
+should report what you measured, including when the answer is "no edge here", and
+then be vague about who wrote it. The data, the backtests, and the negative
+result are real and reproducible: `pytest` runs the suite, the market fixtures in
+`tests/fixtures/` are captured from the live Kalshi API, and the forward
+predictions in `predictions/` are append-only and timestamped before their
+outcomes were known.
+
 ## License
 
 MIT, see [LICENSE](LICENSE).
